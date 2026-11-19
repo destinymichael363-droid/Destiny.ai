@@ -1,6 +1,6 @@
 import streamlit as st
 import pandas as pd
-from destiny.engine import normalize_columns, analyze_market
+from engine import normalize_columns, analyze_market
 
 st.set_page_config(page_title="Destiny AI", page_icon="📊", layout="wide")
 st.title("📊 Destiny AI")
