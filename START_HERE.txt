@@ -1,0 +1,7 @@
+DESTINY AI v2
+
+Android-friendly Python web app. Deploy it on a Streamlit-compatible Python host, then open the hosted page on your phone.
+
+Run command: streamlit run app.py
+
+Read README.md for included features and limitations. It does not connect to MT5 Android or place broker orders.
