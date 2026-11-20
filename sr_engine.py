@@ -1,16 +1,13 @@
 
 # =========================================================
-# DESTINY AI - OPTIMIZED SUPPORT & RESISTANCE ENGINE
-# Historical swing-based zone analysis
+# DESTINY AI - FAST SUPPORT & RESISTANCE ENGINE
+# Vectorized historical zone analysis
 # =========================================================
 
 import pandas as pd
 import numpy as np
 
-
-# Maximum historical candles processed by the S/R engine.
-# The original market data remains unchanged.
-MAX_SR_CANDLES = 1200
+MAX_SR_CANDLES = 400
 
 
 def calculate_atr(data, length=14):
@@ -19,18 +16,18 @@ def calculate_atr(data, length=14):
     low = data["Low"]
     close = data["Close"]
 
-    previous_close = close.shift(1)
+    previous = close.shift(1)
 
-    true_range = pd.concat(
+    tr = pd.concat(
         [
             high - low,
-            (high - previous_close).abs(),
-            (low - previous_close).abs()
+            (high - previous).abs(),
+            (low - previous).abs()
         ],
         axis=1
     ).max(axis=1)
 
-    return true_range.ewm(
+    return tr.ewm(
         span=length,
         adjust=False
     ).mean()
@@ -38,48 +35,36 @@ def calculate_atr(data, length=14):
 
 def find_confirmed_pivots(data, length=8):
 
-    highs = data["High"].to_numpy()
-    lows = data["Low"].to_numpy()
+    highs = data["High"].to_numpy(dtype=float)
+    lows = data["Low"].to_numpy(dtype=float)
 
     pivots = []
 
     for i in range(length, len(data) - length):
 
-        left_highs = highs[i-length:i]
-        right_highs = highs[i+1:i+length+1]
+        left_high = highs[i-length:i].max()
+        right_high = highs[i+1:i+length+1].max()
 
-        left_lows = lows[i-length:i]
-        right_lows = lows[i+1:i+length+1]
+        left_low = lows[i-length:i].min()
+        right_low = lows[i+1:i+length+1].min()
 
-        is_high = (
-            highs[i] >= left_highs.max()
-            and highs[i] > right_highs.max()
-        )
+        if highs[i] >= left_high and highs[i] > right_high:
 
-        is_low = (
-            lows[i] <= left_lows.min()
-            and lows[i] < right_lows.min()
-        )
+            pivots.append((
+                "RESISTANCE",
+                i,
+                i + length,
+                highs[i]
+            ))
 
-        confirmed_at = i + length
+        if lows[i] <= left_low and lows[i] < right_low:
 
-        if is_high:
-
-            pivots.append({
-                "side": "RESISTANCE",
-                "pivot_index": i,
-                "confirmed_index": confirmed_at,
-                "price": float(highs[i])
-            })
-
-        if is_low:
-
-            pivots.append({
-                "side": "SUPPORT",
-                "pivot_index": i,
-                "confirmed_index": confirmed_at,
-                "price": float(lows[i])
-            })
+            pivots.append((
+                "SUPPORT",
+                i,
+                i + length,
+                lows[i]
+            ))
 
     return pivots
 
@@ -97,24 +82,20 @@ def analyze_sr(
 
     required = ["Open", "High", "Low", "Close"]
 
-    if not all(column in data.columns for column in required):
+    if not all(c in data.columns for c in required):
         return pd.DataFrame()
 
-    df = data.copy()
+    df = data[required].copy()
 
     df = df.sort_index()
     df = df[~df.index.duplicated(keep="last")]
 
-    for column in required:
+    df = df.apply(
+        pd.to_numeric,
+        errors="coerce"
+    ).dropna()
 
-        df[column] = pd.to_numeric(
-            df[column],
-            errors="coerce"
-        )
-
-    df = df.dropna(subset=required)
-
-    # Limit the S/R calculation workload.
+    # Only the latest 400 candles are processed.
     df = df.tail(MAX_SR_CANDLES).copy()
 
     if len(df) < pivot_length * 2 + atr_length:
@@ -122,172 +103,119 @@ def analyze_sr(
 
     df["ATR"] = calculate_atr(df, atr_length)
 
-    # Convert columns to NumPy arrays for faster calculations.
-    highs = df["High"].to_numpy(dtype=float)
-    lows = df["Low"].to_numpy(dtype=float)
-    closes = df["Close"].to_numpy(dtype=float)
-    atr_values = df["ATR"].to_numpy(dtype=float)
+    high = df["High"].to_numpy(dtype=float)
+    low = df["Low"].to_numpy(dtype=float)
+    close = df["Close"].to_numpy(dtype=float)
+    atr = df["ATR"].to_numpy(dtype=float)
+
+    times = df.index
 
     pivots = find_confirmed_pivots(
         df,
         pivot_length
     )
 
-    zones = []
+    records = []
 
-    # =====================================================
-    # BUILD SWING ZONES
-    # =====================================================
+    for side, pivot_i, confirmed_i, price in pivots:
 
-    for pivot in pivots:
+        atr_at_pivot = atr[pivot_i]
 
-        pivot_index = pivot["pivot_index"]
-        confirmed_index = pivot["confirmed_index"]
-
-        price = pivot["price"]
-
-        atr_value = atr_values[pivot_index]
-
-        if not np.isfinite(atr_value) or atr_value <= 0:
+        if not np.isfinite(atr_at_pivot) or atr_at_pivot <= 0:
             continue
 
-        width = float(atr_value) * zone_atr
+        width = atr_at_pivot * zone_atr
 
         lower = price - width
         upper = price + width
 
-        # Only candles after pivot confirmation are evaluated.
-        start = confirmed_index + 1
+        start = confirmed_i + 1
 
-        future_highs = highs[start:]
-        future_lows = lows[start:]
-        future_closes = closes[start:]
-        future_atr = atr_values[start:]
+        future_high = high[start:]
+        future_low = low[start:]
+        future_close = close[start:]
+        future_atr = atr[start:]
 
-        if len(future_closes) == 0:
-            touches = 0
-            reactions = 0
-            breaks = 0
+        valid = (
+            np.isfinite(future_atr)
+            & (future_atr > 0)
+        )
+
+        touched = (
+            (future_high >= lower)
+            & (future_low <= upper)
+        )
+
+        if side == "SUPPORT":
+
+            broken = future_close < lower
+
+            reacted = (
+                touched
+                & (future_close > upper)
+                & (
+                    future_close - upper
+                    >= future_atr * reaction_atr
+                )
+            )
 
         else:
 
-            valid = (
-                np.isfinite(future_atr)
-                & (future_atr > 0)
-            )
+            broken = future_close > upper
 
-            touched = (
-                (future_highs >= lower)
-                & (future_lows <= upper)
-            )
-
-            touches = int(
-                np.count_nonzero(touched & valid)
-            )
-
-            if pivot["side"] == "SUPPORT":
-
-                broken = future_closes < lower
-
-                reacted = (
-                    touched
-                    & (future_closes > upper)
-                    & (
-                        future_closes - upper
-                        >= future_atr * reaction_atr
-                    )
+            reacted = (
+                touched
+                & (future_close < lower)
+                & (
+                    lower - future_close
+                    >= future_atr * reaction_atr
                 )
-
-            else:
-
-                broken = future_closes > upper
-
-                reacted = (
-                    touched
-                    & (future_closes < lower)
-                    & (
-                        lower - future_closes
-                        >= future_atr * reaction_atr
-                    )
-                )
-
-            breaks = int(
-                np.count_nonzero(broken & valid)
             )
 
-            reactions = int(
-                np.count_nonzero(reacted & valid)
-            )
-
-        # =================================================
-        # ZONE CLASSIFICATION
-        # =================================================
+        touches = int(np.count_nonzero(touched & valid))
+        reactions = int(np.count_nonzero(reacted & valid))
+        breaks = int(np.count_nonzero(broken & valid))
 
         if breaks > 0:
             status = "BROKEN"
+            strength = "Invalidated"
 
         elif touches == 0:
             status = "FRESH"
+            strength = "Unconfirmed"
 
         elif reactions >= 3:
             status = "REPEATED REACTIONS"
-
-        elif reactions >= 1:
-            status = "REACTED"
-
-        else:
-            status = "TESTED"
-
-        # =================================================
-        # STRENGTH CLASSIFICATION
-        # =================================================
-
-        if breaks > 0:
-            strength = "Invalidated"
-
-        elif reactions >= 3:
             strength = "High historical reaction"
 
         elif reactions >= 1:
+            status = "REACTED"
             strength = "Moderate historical reaction"
 
         else:
+            status = "TESTED"
             strength = "Unconfirmed"
 
-        zones.append({
-
-            "Side": pivot["side"],
-
-            "Price": round(price, 8),
-
-            "Zone Low": round(lower, 8),
-
-            "Zone High": round(upper, 8),
-
-            "Pivot Time": df.index[pivot_index],
-
-            "Confirmed Time": df.index[confirmed_index],
-
+        records.append({
+            "Side": side,
+            "Price": round(float(price), 8),
+            "Zone Low": round(float(lower), 8),
+            "Zone High": round(float(upper), 8),
+            "Pivot Time": times[pivot_i],
+            "Confirmed Time": times[confirmed_i],
             "Touches": touches,
-
             "Reactions": reactions,
-
             "Breaks": breaks,
-
             "Status": status,
-
             "Strength": strength
-
         })
 
-    if not zones:
+    if not records:
         return pd.DataFrame()
 
-    result = pd.DataFrame(zones)
+    result = pd.DataFrame(records)
 
-    result = result.sort_values(
+    return result.sort_values(
         "Confirmed Time",
         ascending=False
     ).reset_index(drop=True)
-
-    return result
