@@ -175,7 +175,7 @@ if st.button("LOAD HISTORICAL DATA", type="primary"):
 
         chart = data.set_index("time")[["close"]]
 
-        st.line_chart(chart, height=400)
+        st.plotly_chart(go.Figure(data=[go.Candlestick(x=data["time"], open=data["open"], high=data["high"], low=data["low"], close=data["close"])]), use_container_width=True)
 
         st.subheader("OHLC Historical Data")
 
