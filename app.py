@@ -654,28 +654,8 @@ except Exception as error:
 # =========================================================
 # RUN ANALYSIS
 # =========================================================
-# RUN HISTORICAL SUPPORT & RESISTANCE ANALYSIS
-# SELECTED TIMEFRAME ONLY
-# =========================================================
 
-@st.cache_data(ttl=300, show_spinner=False)
-def run_sr_analysis(data):
-
-    from sr_engine import analyze_sr
-
-    if data is None or data.empty:
-        return pd.DataFrame()
-    try:
-        return analyze_sr(data)
-
-    except Exception:
-        return pd.DataFrame()
-
-
-sr_analyses = run_sr_analysis(
-    frames.get(chart_timeframe, pd.DataFrame())
-)
-    try:
+try:
 
     with st.spinner("Analysing available timeframes..."):
         analyses = run_all_analyses(frames)
@@ -688,6 +668,30 @@ except Exception as error:
 
 
 # =========================================================
+# RUN HISTORICAL SUPPORT & RESISTANCE ANALYSIS
+# SELECTED TIMEFRAME ONLY
+# =========================================================
+
+@st.cache_data(ttl=300, show_spinner=False)
+def run_sr_analysis(data):
+
+    if data is None or data.empty:
+        return pd.DataFrame()
+
+    try:
+        return analyze_sr(data)
+
+    except Exception:
+        return pd.DataFrame()
+
+
+sr_analyses = run_sr_analysis(
+    frames.get(chart_timeframe, pd.DataFrame())
+)
+
+
+    
+ =========================================================
 # DATA AVAILABILITY
 # =========================================================
 
