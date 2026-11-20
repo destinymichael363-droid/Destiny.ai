@@ -854,9 +854,7 @@ try:
 except Exception as error:
 
     st.error("MTF context could not be generated.")
-    st.caption(str(error))
-
-
+    st.caption(str(error)
 # =========================================================
 # HISTORICAL SUPPORT & RESISTANCE ZONES
 # =========================================================
@@ -877,11 +875,17 @@ if isinstance(sr_selected, pd.DataFrame) and not sr_selected.empty:
     )
 
     st.dataframe(
-        sr_selected.head(20),
+        sr_selected.head(8),
         use_container_width=True,
         hide_index=True
     )
 
+else:
+
+    st.info(
+        "No historical S/R zones are available "
+        "for this timeframe."
+    )
 else:
 
     st.info(
