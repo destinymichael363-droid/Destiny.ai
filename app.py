@@ -668,6 +668,20 @@ except Exception as error:
 
 
 # =========================================================
+# RUN ANALYSIS
+# =========================================================
+
+try:
+    with st.spinner("Analysing available timeframes..."):
+        analyses = run_all_analyses(frames)
+
+except Exception as error:
+    st.error("The analysis process encountered an error.")
+    st.code(str(error))
+    st.stop()
+
+
+# =========================================================
 # RUN HISTORICAL SUPPORT & RESISTANCE ANALYSIS
 # SELECTED TIMEFRAME ONLY
 # =========================================================
@@ -680,7 +694,6 @@ def run_sr_analysis(data):
 
     try:
         return analyze_sr(data)
-
     except Exception:
         return pd.DataFrame()
 
@@ -688,8 +701,6 @@ def run_sr_analysis(data):
 sr_analyses = run_sr_analysis(
     frames.get(chart_timeframe, pd.DataFrame())
 )
-
-
     
  =========================================================
 # DATA AVAILABILITY
