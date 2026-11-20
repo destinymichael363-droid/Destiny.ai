@@ -654,21 +654,29 @@ except Exception as error:
 # =========================================================
 # RUN ANALYSIS
 # =========================================================
-# =========================================================
 # RUN HISTORICAL SUPPORT & RESISTANCE ANALYSIS
+# SELECTED TIMEFRAME ONLY
 # =========================================================
 
-try:
+@st.cache_data(ttl=300, show_spinner=False)
+def run_sr_analysis(data):
 
-    with st.spinner("Analysing historical S/R zones..."):
-        sr_analyses = run_sr_analyses(frames)
+    from sr_engine import analyze_sr
 
-except Exception as error:
+    if data is None or data.empty:
+        return pd.DataFrame()
 
-    st.error("Support and resistance analysis failed.")
-    st.caption(str(error))
-    sr_analyses = {}
-try:
+    try:
+        return analyze_sr(data)
+
+    except Exception:
+        return pd.DataFrame()
+
+
+sr_analyses = run_sr_analysis(
+    frames.get(chart_timeframe, pd.DataFrame())
+)
+    try:
 
     with st.spinner("Analysing available timeframes..."):
         analyses = run_all_analyses(frames)
