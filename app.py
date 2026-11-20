@@ -251,9 +251,6 @@ def run_all_analyses(frames):
 
 
 # =========================================================
-# TIME CONVERSION FOR CHART OVERLAYS
-# =========================================================
-# =========================================================
 # SUPPORT & RESISTANCE ANALYSIS
 # =========================================================
 
@@ -287,6 +284,12 @@ def run_sr_analyses(frames):
             results[timeframe] = pd.DataFrame()
 
     return results
+
+
+# =========================================================
+# TIME CONVERSION FOR CHART OVERLAYS
+# =========================================================
+
 def align_timestamp(value, reference):
 
     timestamp = pd.Timestamp(value)
@@ -652,7 +655,7 @@ except Exception as error:
 
 
 # =========================================================
-# RUN ANALYSIS
+# RUN MULTI-TIMEFRAME ANALYSIS
 # =========================================================
 
 try:
@@ -662,20 +665,6 @@ try:
 
 except Exception as error:
 
-    st.error("The analysis process encountered an error.")
-    st.code(str(error))
-    st.stop()
-
-
-# =========================================================
-# RUN ANALYSIS
-# =========================================================
-
-try:
-    with st.spinner("Analysing available timeframes..."):
-        analyses = run_all_analyses(frames)
-
-except Exception as error:
     st.error("The analysis process encountered an error.")
     st.code(str(error))
     st.stop()
@@ -683,26 +672,22 @@ except Exception as error:
 
 # =========================================================
 # RUN HISTORICAL SUPPORT & RESISTANCE ANALYSIS
-# SELECTED TIMEFRAME ONLY
+# ALL AVAILABLE TIMEFRAMES
 # =========================================================
 
-@st.cache_data(ttl=300, show_spinner=False)
-def run_sr_analysis(data):
+try:
 
-    if data is None or data.empty:
-        return pd.DataFrame()
+    with st.spinner("Analysing historical S/R zones..."):
+        sr_analyses = run_sr_analyses(frames)
 
-    try:
-        return analyze_sr(data)
-    except Exception:
-        return pd.DataFrame()
+except Exception as error:
+
+    st.error("Historical S/R analysis encountered an error.")
+    st.code(str(error))
+    sr_analyses = {}
 
 
-sr_analyses = run_sr_analysis(
-    frames.get(chart_timeframe, pd.DataFrame())
-)
-    
- =========================================================
+# =========================================================
 # DATA AVAILABILITY
 # =========================================================
 
@@ -869,13 +854,9 @@ try:
 except Exception as error:
 
     st.error("MTF context could not be generated.")
-
     st.caption(str(error))
 
 
-# =========================================================
-# EXISTING MULTI-TIMEFRAME STATISTICS
-# =========================================================
 # =========================================================
 # HISTORICAL SUPPORT & RESISTANCE ZONES
 # =========================================================
@@ -906,7 +887,13 @@ else:
     st.info(
         "No historical S/R zones are available "
         "for this timeframe."
-        )
+    )
+
+
+# =========================================================
+# MULTI-TIMEFRAME STATISTICS
+# =========================================================
+
 summary = get_statistics(analyses)
 
 st.subheader("Multi-timeframe statistics")
@@ -916,6 +903,7 @@ st.dataframe(
     use_container_width=True,
     hide_index=True
 )
+
 
 # =========================================================
 # INDIVIDUAL TIMEFRAME DETAILS
@@ -1053,8 +1041,8 @@ with st.expander("Data and engine information"):
     )
 
     st.write(
-        "A combined higher-timeframe decision system and a dedicated "
-        "support/resistance classifier are not yet implemented."
+        "The support/resistance engine calculates historical zones "
+        "for each available timeframe."
     )
 
     st.write(
