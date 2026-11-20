@@ -512,7 +512,64 @@ def get_statistics(results):
 
 
 # =========================================================
-# APPLICATION HEADER
+# HISTORICAL MARKET SCANNER
+# =========================================================
+
+@st.cache_data(ttl=300, show_spinner=False)
+def scan_market_category(category):
+    """Summarise completed 1H historical analysis for one market category."""
+    rows = []
+
+    for instrument, ticker in MARKETS.get(category, {}).items():
+        try:
+            history = remove_latest_candle(
+                fetch_market_data(ticker, "1h", "60d")
+            )
+
+            if history.empty or len(history) < 40:
+                rows.append({
+                    "Instrument": instrument,
+                    "Symbol": ticker,
+                    "Data status": "Unavailable / insufficient",
+                    "Candles analysed": len(history),
+                    "Bullish BOS history": "—",
+                    "Bearish BOS history": "—",
+                    "Historical OB + FVG setups": "—",
+                    "Active historical setups": "—"
+                })
+                continue
+
+            analysis = analyze_market(history.tail(1200).copy())
+            stats = analysis.get("statistics", {})
+
+            rows.append({
+                "Instrument": instrument,
+                "Symbol": ticker,
+                "Data status": "Analysed",
+                "Candles analysed": len(analysis.get("candles", [])),
+                "Bullish BOS history": int(stats.get("bullish_bos", 0) or 0),
+                "Bearish BOS history": int(stats.get("bearish_bos", 0) or 0),
+                "Historical OB + FVG setups": int(stats.get("total_qualified_setups", 0) or 0),
+                "Active historical setups": int(stats.get("active_setups", 0) or 0)
+            })
+
+        except Exception:
+            rows.append({
+                "Instrument": instrument,
+                "Symbol": ticker,
+                "Data status": "Analysis unavailable",
+                "Candles analysed": 0,
+                "Bullish BOS history": "—",
+                "Bearish BOS history": "—",
+                "Historical OB + FVG setups": "—",
+                "Active historical setups": "—"
+            })
+
+    return pd.DataFrame(rows)
+
+
+# =========================================================
+# APPLICATION HEADER AND WORKSPACE NAVIGATION
 # =========================================================
 
 st.title("DESTINY AI")
@@ -521,6 +578,81 @@ st.info(
     "Educational analysis and paper-testing only. "
     "This application does not execute transactions."
 )
+
+workspace = st.radio(
+    "Choose workspace",
+    ["Main Analysis", "Historical Market Scanner"],
+    horizontal=True,
+    key="destiny_workspace"
+)
+
+if workspace == "Historical Market Scanner":
+    st.divider()
+    st.subheader("Historical Market Scanner")
+    st.caption(
+        "Compares completed 1-hour historical data for instruments in the "
+        "selected category. Results are descriptive statistics, not forecasts."
+    )
+
+    scanner_category = st.selectbox(
+        "Market category",
+        list(MARKETS.keys()),
+        key="scanner_market_category"
+    )
+
+    scan_col, refresh_col = st.columns(2)
+    with scan_col:
+        run_scan = st.button(
+            "SCAN SELECTED MARKET",
+            use_container_width=True,
+            type="primary"
+        )
+    with refresh_col:
+        refresh_scan = st.button(
+            "REFRESH SCANNER DATA",
+            use_container_width=True
+        )
+
+    if refresh_scan:
+        scan_market_category.clear()
+        fetch_market_data.clear()
+        st.rerun()
+
+    if run_scan or "destiny_scanner_results" not in st.session_state or st.session_state.get("destiny_scanner_category") != scanner_category:
+        with st.spinner(f"Reviewing historical {scanner_category} data..."):
+            st.session_state["destiny_scanner_results"] = scan_market_category(scanner_category)
+            st.session_state["destiny_scanner_category"] = scanner_category
+
+    scanner_results = st.session_state.get("destiny_scanner_results", pd.DataFrame())
+
+    if isinstance(scanner_results, pd.DataFrame) and not scanner_results.empty:
+        analysed_count = int((scanner_results["Data status"] == "Analysed").sum())
+        st.metric("Instruments analysed", f"{analysed_count} / {len(scanner_results)}")
+        st.dataframe(
+            scanner_results,
+            use_container_width=True,
+            hide_index=True
+        )
+        st.download_button(
+            "Download scanner results",
+            data=scanner_results.to_csv(index=False).encode("utf-8"),
+            file_name=f"destiny_{scanner_category.lower()}_historical_scan.csv",
+            mime="text/csv",
+            use_container_width=True
+        )
+    else:
+        st.info("Choose a market category and tap SCAN SELECTED MARKET.")
+
+    st.caption(
+        "Scanner coverage: 1-hour candles, up to 60 days where the data "
+        "provider makes them available. Data is cached for 5 minutes; "
+        "use Refresh Scanner Data to request a new download."
+    )
+    st.warning(
+        "BOS and OB + FVG counts describe past candles only. They are not "
+        "buy/sell instructions, predictions, or a measure of future performance."
+    )
+    st.stop()
 
 
 # =========================================================
