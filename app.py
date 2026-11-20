@@ -1,4 +1,4 @@
-import plotly.graph_objects as go
+Trueueport plotly.graph_objects as go
 import streamlit as st
 import pandas as pd
 import yfinance as yf
@@ -175,7 +175,30 @@ if st.button("LOAD HISTORICAL DATA", type="primary"):
 
         chart = data.set_index("time")[["close"]]
 
-        st.plotly_chart(go.Figure(data=[go.Candlestick(x=data["time"], open=data["open"], high=data["high"], low=data["low"], close=data["close"])]), use_container_width=True)
+        fig = go.Figure(data=[go.Candlestick(
+    x=data["time"],
+    open=data["open"],
+    high=data["high"],
+    low=data["low"],
+    close=data["close"],
+    increasing_line_color="#00C853",
+    decreasing_line_color="#FF1744",
+    increasing_fillcolor="#00C853",
+    decreasing_fillcolor="#FF1744"
+)])
+
+fig.update_layout(
+    height=650,
+    xaxis_rangeslider_visible=False,
+    template="plotly_dark",
+    dragmode="pan",
+    margin=dict(l=10, r=10, t=30, b=10)
+)
+
+fig.update_xaxes(showgrid=True, gridcolor="#333333")
+fig.update_yaxes(showgrid=True, gridcolor="#333333")
+
+st.plotly_chart(fig, use_container_width=True)
 
         st.subheader("OHLC Historical Data")
 
