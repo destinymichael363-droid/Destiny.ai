@@ -877,3 +877,28 @@ with st.expander("Data and engine information"):
 st.caption(
     "DESTINY AI | Historical market analysis and paper-testing"
 )
+import streamlit as st
+import pandas as pd
+import yfinance as yf
+import urllib.request
+
+# DESTINY AI NOTIFICATIONS
+
+def send_app_notification(title, message):
+    try:
+        topic = st.secrets["NTFY_TOPIC"].strip()
+        url = f"https://ntfy.sh/{topic}"
+
+        request = urllib.request.Request(
+            url,
+            data=message.encode("utf-8"),
+            headers={"Title": title},
+            method="POST"
+        )
+
+        with urllib.request.urlopen(request, timeout=10) as response:
+            return response.status == 200
+
+    except Exception as error:
+        st.warning(f"Notification could not be sent: {error}")
+        return False
