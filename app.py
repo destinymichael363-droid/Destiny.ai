@@ -729,21 +729,95 @@ else:
 
 
 # =========================================================
-# MULTI-TIMEFRAME SUMMARY
+# MULTI-TIMEFRAME CONTEXT ENGINE
 # =========================================================
 
 st.divider()
 
-st.subheader("Multi-timeframe analysis")
+st.subheader("Destiny AI — MTF Structure Context")
+
+try:
+
+    mtf_context = build_mtf_context(analyses)
+
+    st.caption(
+        mtf_context.get(
+            "data_coverage",
+            "MTF coverage unavailable"
+        )
+    )
+
+    st.markdown("### Higher Timeframe Context")
+
+    st.info(
+        mtf_context.get(
+            "higher_timeframe_summary",
+            "Higher timeframe analysis unavailable."
+        )
+    )
+
+    st.markdown("### Lower Timeframe Context")
+
+    st.info(
+        mtf_context.get(
+            "lower_timeframe_summary",
+            "Lower timeframe analysis unavailable."
+        )
+    )
+
+    # Timeframe breakdown
+    mtf_rows = []
+
+    for timeframe in TIMEFRAMES:
+
+        item = mtf_context.get(
+            "timeframes", {}
+        ).get(timeframe, {})
+
+        mtf_rows.append({
+            "Timeframe": timeframe,
+            "Status": item.get("status", "Unavailable"),
+            "Bullish BOS": item.get("bullish_bos", 0),
+            "Bearish BOS": item.get("bearish_bos", 0),
+            "Structure": item.get(
+                "structure",
+                "Insufficient data"
+            )
+        })
+
+    mtf_table = pd.DataFrame(mtf_rows)
+
+    st.dataframe(
+        mtf_table,
+        use_container_width=True,
+        hide_index=True
+    )
+
+    st.caption(
+        "MTF context summarizes historical BOS counts. "
+        "It does not predict price direction or generate trade signals."
+    )
+
+except Exception as error:
+
+    st.error("MTF context could not be generated.")
+
+    st.caption(str(error))
+
+
+# =========================================================
+# EXISTING MULTI-TIMEFRAME STATISTICS
+# =========================================================
 
 summary = get_statistics(analyses)
+
+st.subheader("Multi-timeframe statistics")
 
 st.dataframe(
     summary,
     use_container_width=True,
     hide_index=True
 )
-
 
 # =========================================================
 # INDIVIDUAL TIMEFRAME DETAILS
