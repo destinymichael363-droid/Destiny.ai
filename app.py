@@ -253,7 +253,40 @@ def run_all_analyses(frames):
 # =========================================================
 # TIME CONVERSION FOR CHART OVERLAYS
 # =========================================================
+# =========================================================
+# SUPPORT & RESISTANCE ANALYSIS
+# =========================================================
 
+def run_sr_analyses(frames):
+
+    from sr_engine import analyze_sr
+
+    results = {}
+
+    for timeframe in TIMEFRAMES:
+
+        data = frames.get(
+            timeframe,
+            pd.DataFrame()
+        )
+
+        if data is None or data.empty:
+            results[timeframe] = pd.DataFrame()
+            continue
+
+        try:
+
+            zones = analyze_sr(data)
+
+            if isinstance(zones, pd.DataFrame):
+                results[timeframe] = zones
+            else:
+                results[timeframe] = pd.DataFrame()
+
+        except Exception:
+            results[timeframe] = pd.DataFrame()
+
+    return results
 def align_timestamp(value, reference):
 
     timestamp = pd.Timestamp(value)
