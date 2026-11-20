@@ -4,7 +4,7 @@ import pandas as pd
 import yfinance as yf
 import plotly.graph_objects as go
 
-from strategy_engine import run_destiny_ai
+from strategy_engine import analyze_market
 
 
 # =========================================================
