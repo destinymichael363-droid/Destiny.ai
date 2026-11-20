@@ -665,7 +665,6 @@ def run_sr_analysis(data):
 
     if data is None or data.empty:
         return pd.DataFrame()
-
     try:
         return analyze_sr(data)
 
