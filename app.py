@@ -298,3 +298,4 @@ if st.button("Load Historical Market Data", key="destiny_load_data"):
     except Exception as error:
         st.error(f"Data loading failed: {error}")
         st.info("Try a different asset or historical period.")
+st.success("DESTINY NEW CODE IS RUNNING")
