@@ -562,4 +562,3 @@ def analyze_market(data, settings=None):
         "liquidity": liquidity_table,
         "statistics": statistics
     }
-
