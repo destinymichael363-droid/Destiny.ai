@@ -902,3 +902,4 @@ def send_app_notification(title, message):
     except Exception as error:
         st.warning(f"Notification could not be sent: {error}")
         return False
+send_app_notification()
