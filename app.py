@@ -6,6 +6,35 @@ import plotly.graph_objects as go
 import urllib.request
 from strategy_engine import analyze_market
 
+
+# =========================================================
+# DESTINY AI - ANDROID APP STATUS NOTIFICATIONS
+# =========================================================
+
+def send_app_notification(title, message):
+    """Send a non-trading app-status notification to the private ntfy topic."""
+    try:
+        topic = st.secrets["NTFY_TOPIC"].strip()
+        if not topic:
+            st.warning("NTFY_TOPIC is empty. Check Streamlit Secrets.")
+            return False
+
+        url = f"https://ntfy.sh/{topic}"
+        request = urllib.request.Request(
+            url,
+            data=message.encode("utf-8"),
+            headers={"Title": title},
+            method="POST"
+        )
+
+        with urllib.request.urlopen(request, timeout=10) as response:
+            return response.status in (200, 201)
+
+    except Exception as error:
+        st.warning(f"Notification could not be sent: {error}")
+        return False
+
+
 # =========================================================
 # DESTINY AI - MAIN APPLICATION
 # Historical market analysis and paper-testing
@@ -17,6 +46,15 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="collapsed"
 )
+
+# Manual notification test. This does not send trading alerts.
+if st.sidebar.button("Test Android Notification"):
+    if send_app_notification(
+        "Destiny AI",
+        "Your Android app-status notification connection is working."
+    ):
+        st.sidebar.success("Test notification sent. Check your ntfy app.")
+
 
 TIMEFRAMES = ["1D", "4H", "1H", "15M", "5M", "1M"]
 
@@ -51,6 +89,7 @@ MARKETS = {
         "Copper": "HG=F"
     }
 }
+
 
 # =========================================================
 # DATA DOWNLOAD
@@ -88,7 +127,6 @@ def fetch_market_data(symbol, interval, period):
         df = df.dropna(subset=["Open", "High", "Low", "Close"])
         df = df.sort_index()
         df = df[~df.index.duplicated(keep="last")]
-
         return df
 
     except Exception:
@@ -124,7 +162,6 @@ def build_four_hour_data(hourly):
 
         if len(result) > 1:
             result = result.iloc[:-1]
-
         return result
 
     except Exception:
@@ -136,7 +173,6 @@ def load_all_timeframes(symbol):
     frames = {}
 
     daily = fetch_market_data(symbol, "1d", "2y")
-
     if not daily.empty:
         today_utc = pd.Timestamp.now(tz="UTC").date()
         if daily.index[-1].date() >= today_utc:
@@ -161,17 +197,14 @@ def load_all_timeframes(symbol):
     frames["15M"] = fifteen
     frames["5M"] = five
     frames["1M"] = one
-
     return frames
 
 
 # =========================================================
 # MULTI-TIMEFRAME ANALYSIS ENGINE
-# SPEED CORRECTIONS:
-# 1. Cache completed timeframe analysis for 30 minutes.
-# 2. Analyse the latest 1,200 candles per timeframe.
-#    The original downloaded data remains available for charts
-#    and CSV downloads.
+# Cache completed analysis for 30 minutes.
+# Analyse latest 1,200 candles per timeframe.
+# Full downloaded data remains available for charts and CSV.
 # =========================================================
 
 @st.cache_data(ttl=1800, show_spinner=False)
@@ -214,8 +247,7 @@ def run_all_analyses(frames):
 
 # =========================================================
 # SELECTED-TIMEFRAME SUPPORT & RESISTANCE
-# SPEED CORRECTION:
-# Only the selected timeframe and latest 400 candles are used.
+# Only selected timeframe and latest 400 candles are used.
 # =========================================================
 
 @st.cache_data(ttl=1800, show_spinner=False)
@@ -231,7 +263,6 @@ def run_sr_analysis(data):
 
         if isinstance(zones, pd.DataFrame):
             return zones.head(8).copy()
-
         return pd.DataFrame()
 
     except Exception:
@@ -266,7 +297,6 @@ def display_chart(data, result, symbol, timeframe):
 
     start_time = chart_data.index[0]
     end_time = chart_data.index[-1]
-
     fig = go.Figure()
 
     fig.add_trace(
@@ -287,7 +317,6 @@ def display_chart(data, result, symbol, timeframe):
 
     # ORDER BLOCK AND FAIR VALUE GAP OVERLAYS
     setups = result.get("setups", pd.DataFrame())
-
     required_setup_columns = [
         "ob_time", "ob_low", "ob_high", "direction"
     ]
@@ -304,13 +333,11 @@ def display_chart(data, result, symbol, timeframe):
                     continue
 
                 ob_time = align_timestamp(ob_time, start_time)
-
                 if not start_time <= ob_time <= end_time:
                     continue
 
                 ob_low = float(setup["ob_low"])
                 ob_high = float(setup["ob_high"])
-
                 if ob_low >= ob_high:
                     continue
 
@@ -383,7 +410,6 @@ def display_chart(data, result, symbol, timeframe):
 
                 side = level.get("side")
                 color = "#F04452" if side == "BSL" else "#00C087"
-
                 fig.add_hline(
                     y=price,
                     line_dash="dot",
@@ -491,7 +517,6 @@ def get_statistics(results):
 
 st.title("DESTINY AI")
 st.caption("Multi-timeframe historical market analysis")
-
 st.info(
     "Educational analysis and paper-testing only. "
     "This application does not execute transactions."
@@ -517,7 +542,6 @@ with right:
     )
 
 symbol = MARKETS[market_type][asset_name]
-
 chart_timeframe = st.selectbox(
     "Main chart timeframe",
     TIMEFRAMES,
@@ -589,7 +613,6 @@ except Exception as error:
 
 st.divider()
 st.subheader("Market data availability")
-
 status_columns = st.columns(3)
 
 for index, timeframe in enumerate(TIMEFRAMES):
@@ -608,7 +631,6 @@ for index, timeframe in enumerate(TIMEFRAMES):
 
 st.divider()
 st.subheader("Price chart")
-
 selected_analysis = analyses.get(chart_timeframe, {})
 
 if (
@@ -625,7 +647,6 @@ if (
     )
 
     latest_close = selected_data["Close"].iloc[-1]
-
     st.metric(
         "Latest completed candle close",
         f"{latest_close:,.5f}"
@@ -689,7 +710,6 @@ try:
 
     for timeframe in TIMEFRAMES:
         item = mtf_context.get("timeframes", {}).get(timeframe, {})
-
         mtf_rows.append({
             "Timeframe": timeframe,
             "Status": item.get("status", "Unavailable"),
@@ -699,7 +719,6 @@ try:
         })
 
     mtf_table = pd.DataFrame(mtf_rows)
-
     st.dataframe(
         mtf_table,
         use_container_width=True,
@@ -729,7 +748,6 @@ if isinstance(sr_selected, pd.DataFrame) and not sr_selected.empty:
         f"Up to 8 historical S/R zones detected on {chart_timeframe}. "
         "The S/R calculation uses the latest 400 candles."
     )
-
     st.dataframe(
         sr_selected.head(8),
         use_container_width=True,
@@ -748,9 +766,7 @@ else:
 # =========================================================
 
 summary = get_statistics(analyses)
-
 st.subheader("Multi-timeframe statistics")
-
 st.dataframe(
     summary,
     use_container_width=True,
@@ -781,7 +797,6 @@ for timeframe in TIMEFRAMES:
 
         result = item["data"]
         stats = result.get("statistics", {})
-
         a, b, c = st.columns(3)
 
         with a:
@@ -800,17 +815,14 @@ for timeframe in TIMEFRAMES:
             "**Active setups:**",
             stats.get("active_setups", 0)
         )
-
         st.write(
             "**Invalidated setups:**",
             stats.get("invalidated_setups", 0)
         )
-
         st.write(
             "**Active BSL levels:**",
             stats.get("active_bsl_levels", 0)
         )
-
         st.write(
             "**Active SSL levels:**",
             stats.get("active_ssl_levels", 0)
@@ -820,7 +832,6 @@ for timeframe in TIMEFRAMES:
 
         if isinstance(setups, pd.DataFrame) and not setups.empty:
             st.write("**Qualified OB + FVG setups**")
-
             st.dataframe(
                 setups.tail(30),
                 use_container_width=True,
@@ -836,7 +847,6 @@ for timeframe in TIMEFRAMES:
 
         if isinstance(liquidity, pd.DataFrame) and not liquidity.empty:
             st.write("**BSL / SSL liquidity history**")
-
             st.dataframe(
                 liquidity.tail(30),
                 use_container_width=True,
@@ -877,29 +887,3 @@ with st.expander("Data and engine information"):
 st.caption(
     "DESTINY AI | Historical market analysis and paper-testing"
 )
-import streamlit as st
-import pandas as pd
-import yfinance as yf
-import urllib.request
-
-# DESTINY AI NOTIFICATIONS
-
-def send_app_notification(title, message):
-    try:
-        topic = st.secrets["NTFY_TOPIC"].strip()
-        url = f"https://ntfy.sh/{topic}"
-
-        request = urllib.request.Request(
-            url,
-            data=message.encode("utf-8"),
-            headers={"Title": title},
-            method="POST"
-        )
-
-        with urllib.request.urlopen(request, timeout=10) as response:
-            return response.status == 200
-
-    except Exception as error:
-        st.warning(f"Notification could not be sent: {error}")
-        return False
-send_app_notification()
