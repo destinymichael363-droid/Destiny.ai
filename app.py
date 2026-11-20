@@ -1,3 +1,4 @@
+
 from mtf_context import build_mtf_context
 import streamlit as st
 import pandas as pd
@@ -98,10 +99,7 @@ def fetch_market_data(symbol, interval, period):
         )
 
         df = df.sort_index()
-
-        df = df[
-            ~df.index.duplicated(keep="last")
-        ]
+        df = df[~df.index.duplicated(keep="last")]
 
         return df
 
@@ -153,42 +151,24 @@ def load_all_timeframes(symbol):
 
     frames = {}
 
-    # Daily data
-    daily = fetch_market_data(
-        symbol, "1d", "2y"
-    )
+    daily = fetch_market_data(symbol, "1d", "2y")
 
     if not daily.empty:
-
-        today_utc = pd.Timestamp.now(
-            tz="UTC"
-        ).date()
+        today_utc = pd.Timestamp.now(tz="UTC").date()
 
         if daily.index[-1].date() >= today_utc:
             daily = daily.iloc[:-1].copy()
 
-    # Hourly data
-    hourly = fetch_market_data(
-        symbol, "1h", "730d"
-    )
+    hourly = fetch_market_data(symbol, "1h", "730d")
     hourly = remove_latest_candle(hourly)
 
-    # 15-minute data
-    fifteen = fetch_market_data(
-        symbol, "15m", "60d"
-    )
+    fifteen = fetch_market_data(symbol, "15m", "60d")
     fifteen = remove_latest_candle(fifteen)
 
-    # 5-minute data
-    five = fetch_market_data(
-        symbol, "5m", "60d"
-    )
+    five = fetch_market_data(symbol, "5m", "60d")
     five = remove_latest_candle(five)
 
-    # 1-minute data
-    one = fetch_market_data(
-        symbol, "1m", "7d"
-    )
+    one = fetch_market_data(symbol, "1m", "7d")
     one = remove_latest_candle(one)
 
     frames["1D"] = daily
@@ -202,7 +182,7 @@ def load_all_timeframes(symbol):
 
 
 # =========================================================
-# ANALYSIS ENGINE
+# MULTI-TIMEFRAME ANALYSIS ENGINE
 # =========================================================
 
 def run_all_analyses(frames):
@@ -211,22 +191,16 @@ def run_all_analyses(frames):
 
     for timeframe in TIMEFRAMES:
 
-        data = frames.get(
-            timeframe,
-            pd.DataFrame()
-        )
+        data = frames.get(timeframe, pd.DataFrame())
 
         if data is None or data.empty:
-
             results[timeframe] = {
                 "status": "UNAVAILABLE",
                 "error": "Market data is unavailable."
             }
-
             continue
 
         try:
-
             result = analyze_market(data)
 
             if not isinstance(result, dict):
@@ -241,7 +215,6 @@ def run_all_analyses(frames):
             }
 
         except Exception as error:
-
             results[timeframe] = {
                 "status": "ERROR",
                 "error": str(error)
@@ -251,39 +224,27 @@ def run_all_analyses(frames):
 
 
 # =========================================================
-# SUPPORT & RESISTANCE ANALYSIS
+# SELECTED-TIMEFRAME SUPPORT & RESISTANCE
 # =========================================================
 
-def run_sr_analyses(frames):
+@st.cache_data(ttl=300, show_spinner=False)
+def run_sr_analysis(data):
 
     from sr_engine import analyze_sr
 
-    results = {}
+    if data is None or data.empty:
+        return pd.DataFrame()
 
-    for timeframe in TIMEFRAMES:
+    try:
+        zones = analyze_sr(data)
 
-        data = frames.get(
-            timeframe,
-            pd.DataFrame()
-        )
+        if isinstance(zones, pd.DataFrame):
+            return zones.head(8).copy()
 
-        if data is None or data.empty:
-            results[timeframe] = pd.DataFrame()
-            continue
+        return pd.DataFrame()
 
-        try:
-
-            zones = analyze_sr(data)
-
-            if isinstance(zones, pd.DataFrame):
-                results[timeframe] = zones
-            else:
-                results[timeframe] = pd.DataFrame()
-
-        except Exception:
-            results[timeframe] = pd.DataFrame()
-
-    return results
+    except Exception:
+        return pd.DataFrame()
 
 
 # =========================================================
@@ -320,7 +281,6 @@ def display_chart(data, result, symbol, timeframe):
 
     fig = go.Figure()
 
-    # Candlesticks
     fig.add_trace(
         go.Candlestick(
             x=chart_data.index,
@@ -337,11 +297,9 @@ def display_chart(data, result, symbol, timeframe):
         )
     )
 
-    # OB and FVG overlays
-    setups = result.get(
-        "setups",
-        pd.DataFrame()
-    )
+    # ORDER BLOCK AND FAIR VALUE GAP OVERLAYS
+
+    setups = result.get("setups", pd.DataFrame())
 
     required_setup_columns = [
         "ob_time",
@@ -359,15 +317,12 @@ def display_chart(data, result, symbol, timeframe):
         for _, setup in setups.tail(30).iterrows():
 
             try:
-
                 ob_time = setup.get("ob_time")
 
                 if pd.isna(ob_time):
                     continue
 
-                ob_time = align_timestamp(
-                    ob_time, start_time
-                )
+                ob_time = align_timestamp(ob_time, start_time)
 
                 if not start_time <= ob_time <= end_time:
                     continue
@@ -397,7 +352,6 @@ def display_chart(data, result, symbol, timeframe):
                     layer="below"
                 )
 
-                # FVG overlay
                 if all(
                     column in setups.columns
                     for column in [
@@ -440,11 +394,9 @@ def display_chart(data, result, symbol, timeframe):
             except Exception:
                 continue
 
-    # BSL and SSL levels
-    liquidity = result.get(
-        "liquidity",
-        pd.DataFrame()
-    )
+    # BSL AND SSL LEVELS
+
+    liquidity = result.get("liquidity", pd.DataFrame())
 
     if (
         isinstance(liquidity, pd.DataFrame)
@@ -460,7 +412,6 @@ def display_chart(data, result, symbol, timeframe):
         for _, level in active.iterrows():
 
             try:
-
                 price = float(level["price"])
 
                 if pd.isna(price):
@@ -484,7 +435,8 @@ def display_chart(data, result, symbol, timeframe):
             except Exception:
                 continue
 
-    # Chart appearance
+    # CHART APPEARANCE
+
     fig.update_layout(
         title=dict(
             text=f"{symbol} | {timeframe}",
@@ -493,12 +445,7 @@ def display_chart(data, result, symbol, timeframe):
         template="plotly_dark",
         height=460,
         autosize=True,
-        margin=dict(
-            l=10,
-            r=15,
-            t=50,
-            b=35
-        ),
+        margin=dict(l=10, r=15, t=50, b=35),
         font=dict(size=13),
         xaxis=dict(
             title="Time",
@@ -590,9 +537,7 @@ def get_statistics(results):
 
 st.title("DESTINY AI")
 
-st.caption(
-    "Multi-timeframe historical market analysis"
-)
+st.caption("Multi-timeframe historical market analysis")
 
 st.info(
     "Educational analysis and paper-testing only. "
@@ -607,14 +552,12 @@ st.info(
 left, right = st.columns(2)
 
 with left:
-
     market_type = st.selectbox(
         "Select market",
         list(MARKETS.keys())
     )
 
 with right:
-
     asset_name = st.selectbox(
         "Select instrument",
         list(MARKETS[market_type].keys())
@@ -643,12 +586,10 @@ if refresh:
 # =========================================================
 
 try:
-
     with st.spinner("Loading market data..."):
         frames = load_all_timeframes(symbol)
 
 except Exception as error:
-
     st.error("The market data could not be loaded.")
     st.code(str(error))
     st.stop()
@@ -659,32 +600,34 @@ except Exception as error:
 # =========================================================
 
 try:
-
     with st.spinner("Analysing available timeframes..."):
         analyses = run_all_analyses(frames)
 
 except Exception as error:
-
     st.error("The analysis process encountered an error.")
     st.code(str(error))
     st.stop()
 
 
 # =========================================================
-# RUN HISTORICAL SUPPORT & RESISTANCE ANALYSIS
-# ALL AVAILABLE TIMEFRAMES
+# RUN S/R ONLY FOR THE SELECTED TIMEFRAME
 # =========================================================
 
-try:
+selected_data = frames.get(
+    chart_timeframe,
+    pd.DataFrame()
+)
 
-    with st.spinner("Analysing historical S/R zones..."):
-        sr_analyses = run_sr_analyses(frames)
+try:
+    with st.spinner(
+        f"Analysing historical S/R on {chart_timeframe}..."
+    ):
+        sr_selected = run_sr_analysis(selected_data)
 
 except Exception as error:
-
     st.error("Historical S/R analysis encountered an error.")
     st.code(str(error))
-    sr_analyses = {}
+    sr_selected = pd.DataFrame()
 
 
 # =========================================================
@@ -692,31 +635,20 @@ except Exception as error:
 # =========================================================
 
 st.divider()
-
 st.subheader("Market data availability")
 
 status_columns = st.columns(3)
 
 for index, timeframe in enumerate(TIMEFRAMES):
 
-    data = frames.get(
-        timeframe,
-        pd.DataFrame()
-    )
+    data = frames.get(timeframe, pd.DataFrame())
 
     with status_columns[index % 3]:
 
         if not data.empty:
-
-            st.success(
-                f"{timeframe}: {len(data)} candles"
-            )
-
+            st.success(f"{timeframe}: {len(data)} candles")
         else:
-
-            st.warning(
-                f"{timeframe}: Unavailable"
-            )
+            st.warning(f"{timeframe}: Unavailable")
 
 
 # =========================================================
@@ -724,13 +656,7 @@ for index, timeframe in enumerate(TIMEFRAMES):
 # =========================================================
 
 st.divider()
-
 st.subheader("Price chart")
-
-selected_data = frames.get(
-    chart_timeframe,
-    pd.DataFrame()
-)
 
 selected_analysis = analyses.get(
     chart_timeframe,
@@ -786,7 +712,6 @@ else:
 # =========================================================
 
 st.divider()
-
 st.subheader("Destiny AI — MTF Structure Context")
 
 try:
@@ -818,7 +743,6 @@ try:
         )
     )
 
-    # Timeframe breakdown
     mtf_rows = []
 
     for timeframe in TIMEFRAMES:
@@ -854,24 +778,21 @@ try:
 except Exception as error:
 
     st.error("MTF context could not be generated.")
-    st.caption(str(error)
+    st.caption(str(error))
+
+
 # =========================================================
 # HISTORICAL SUPPORT & RESISTANCE ZONES
+# MAXIMUM 8 DISPLAYED LEVELS
 # =========================================================
 
 st.divider()
-
 st.subheader("Historical Support & Resistance Zones")
-
-sr_selected = sr_analyses.get(
-    chart_timeframe,
-    pd.DataFrame()
-)
 
 if isinstance(sr_selected, pd.DataFrame) and not sr_selected.empty:
 
     st.caption(
-        f"Historical S/R zones detected on {chart_timeframe}."
+        f"Up to 8 historical S/R zones detected on {chart_timeframe}."
     )
 
     st.dataframe(
@@ -880,12 +801,6 @@ if isinstance(sr_selected, pd.DataFrame) and not sr_selected.empty:
         hide_index=True
     )
 
-else:
-
-    st.info(
-        "No historical S/R zones are available "
-        "for this timeframe."
-    )
 else:
 
     st.info(
@@ -925,12 +840,10 @@ for timeframe in TIMEFRAMES:
     ):
 
         if item.get("status") == "UNAVAILABLE":
-
             st.warning(item.get("error"))
             continue
 
         if item.get("status") == "ERROR":
-
             st.error(item.get("error"))
             continue
 
@@ -977,10 +890,7 @@ for timeframe in TIMEFRAMES:
             stats.get("active_ssl_levels", 0)
         )
 
-        setups = result.get(
-            "setups",
-            pd.DataFrame()
-        )
+        setups = result.get("setups", pd.DataFrame())
 
         if isinstance(setups, pd.DataFrame) and not setups.empty:
 
@@ -999,10 +909,7 @@ for timeframe in TIMEFRAMES:
                 "in the available history."
             )
 
-        liquidity = result.get(
-            "liquidity",
-            pd.DataFrame()
-        )
+        liquidity = result.get("liquidity", pd.DataFrame())
 
         if isinstance(liquidity, pd.DataFrame) and not liquidity.empty:
 
@@ -1045,8 +952,12 @@ with st.expander("Data and engine information"):
     )
 
     st.write(
-        "The support/resistance engine calculates historical zones "
-        "for each available timeframe."
+        "The support/resistance engine calculates zones only "
+        "for the currently selected chart timeframe."
+    )
+
+    st.write(
+        "A maximum of 8 S/R zones is displayed."
     )
 
     st.write(
