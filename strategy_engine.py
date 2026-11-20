@@ -4,7 +4,7 @@ DESTINY AI — BOS + INSTITUTIONAL OB + FVG + BSL/SSL
 Educational historical market-analysis engine.
 Input: OHLCV pandas DataFrame.
 """
-from strategy_engine import analyze_market
+
 import pandas as pd
 
 
