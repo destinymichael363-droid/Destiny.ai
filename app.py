@@ -854,7 +854,37 @@ except Exception as error:
 # =========================================================
 # EXISTING MULTI-TIMEFRAME STATISTICS
 # =========================================================
+# =========================================================
+# HISTORICAL SUPPORT & RESISTANCE ZONES
+# =========================================================
 
+st.divider()
+
+st.subheader("Historical Support & Resistance Zones")
+
+sr_selected = sr_analyses.get(
+    chart_timeframe,
+    pd.DataFrame()
+)
+
+if isinstance(sr_selected, pd.DataFrame) and not sr_selected.empty:
+
+    st.caption(
+        f"Historical S/R zones detected on {chart_timeframe}."
+    )
+
+    st.dataframe(
+        sr_selected.head(20),
+        use_container_width=True,
+        hide_index=True
+    )
+
+else:
+
+    st.info(
+        "No historical S/R zones are available "
+        "for this timeframe."
+        )
 summary = get_statistics(analyses)
 
 st.subheader("Multi-timeframe statistics")
