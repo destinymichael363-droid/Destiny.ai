@@ -3,7 +3,7 @@ import streamlit as st
 import pandas as pd
 import yfinance as yf
 import plotly.graph_objects as go
-
+import urllib.request
 from strategy_engine import analyze_market
 
 # =========================================================
