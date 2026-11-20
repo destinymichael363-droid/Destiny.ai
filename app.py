@@ -654,7 +654,20 @@ except Exception as error:
 # =========================================================
 # RUN ANALYSIS
 # =========================================================
+# =========================================================
+# RUN HISTORICAL SUPPORT & RESISTANCE ANALYSIS
+# =========================================================
 
+try:
+
+    with st.spinner("Analysing historical S/R zones..."):
+        sr_analyses = run_sr_analyses(frames)
+
+except Exception as error:
+
+    st.error("Support and resistance analysis failed.")
+    st.caption(str(error))
+    sr_analyses = {}
 try:
 
     with st.spinner("Analysing available timeframes..."):
