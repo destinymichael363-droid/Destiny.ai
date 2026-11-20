@@ -1,9 +1,16 @@
+
 # =========================================================
-# DESTINY AI - SUPPORT & RESISTANCE ENGINE
+# DESTINY AI - OPTIMIZED SUPPORT & RESISTANCE ENGINE
 # Historical swing-based zone analysis
 # =========================================================
 
 import pandas as pd
+import numpy as np
+
+
+# Maximum historical candles processed by the S/R engine.
+# The original market data remains unchanged.
+MAX_SR_CANDLES = 1200
 
 
 def calculate_atr(data, length=14):
@@ -31,8 +38,8 @@ def calculate_atr(data, length=14):
 
 def find_confirmed_pivots(data, length=8):
 
-    highs = data["High"].values
-    lows = data["Low"].values
+    highs = data["High"].to_numpy()
+    lows = data["Low"].to_numpy()
 
     pivots = []
 
@@ -54,8 +61,6 @@ def find_confirmed_pivots(data, length=8):
             and lows[i] < right_lows.min()
         )
 
-        # Pivot is only considered confirmed
-        # after the right-side candles exist.
         confirmed_at = i + length
 
         if is_high:
@@ -88,30 +93,17 @@ def analyze_sr(
 ):
 
     if data is None or data.empty:
-
         return pd.DataFrame()
 
-    required = [
-        "Open",
-        "High",
-        "Low",
-        "Close"
-    ]
+    required = ["Open", "High", "Low", "Close"]
 
-    if not all(
-        column in data.columns
-        for column in required
-    ):
-
+    if not all(column in data.columns for column in required):
         return pd.DataFrame()
 
     df = data.copy()
 
     df = df.sort_index()
-
-    df = df[
-        ~df.index.duplicated(keep="last")
-    ]
+    df = df[~df.index.duplicated(keep="last")]
 
     for column in required:
 
@@ -120,18 +112,21 @@ def analyze_sr(
             errors="coerce"
         )
 
-    df = df.dropna(
-        subset=required
-    )
+    df = df.dropna(subset=required)
 
-    if len(df) < (pivot_length * 2 + atr_length):
+    # Limit the S/R calculation workload.
+    df = df.tail(MAX_SR_CANDLES).copy()
 
+    if len(df) < pivot_length * 2 + atr_length:
         return pd.DataFrame()
 
-    df["ATR"] = calculate_atr(
-        df,
-        atr_length
-    )
+    df["ATR"] = calculate_atr(df, atr_length)
+
+    # Convert columns to NumPy arrays for faster calculations.
+    highs = df["High"].to_numpy(dtype=float)
+    lows = df["Low"].to_numpy(dtype=float)
+    closes = df["Close"].to_numpy(dtype=float)
+    atr_values = df["ATR"].to_numpy(dtype=float)
 
     pivots = find_confirmed_pivots(
         df,
@@ -151,10 +146,9 @@ def analyze_sr(
 
         price = pivot["price"]
 
-        atr_value = df["ATR"].iloc[pivot_index]
+        atr_value = atr_values[pivot_index]
 
-        if pd.isna(atr_value) or atr_value <= 0:
-
+        if not np.isfinite(atr_value) or atr_value <= 0:
             continue
 
         width = float(atr_value) * zone_atr
@@ -162,103 +156,86 @@ def analyze_sr(
         lower = price - width
         upper = price + width
 
-        touches = 0
-        reactions = 0
-        breaks = 0
+        # Only candles after pivot confirmation are evaluated.
+        start = confirmed_index + 1
 
-        reaction_seen = False
+        future_highs = highs[start:]
+        future_lows = lows[start:]
+        future_closes = closes[start:]
+        future_atr = atr_values[start:]
 
-        # =================================================
-        # COUNT ONLY EVENTS AFTER PIVOT CONFIRMATION
-        # =================================================
+        if len(future_closes) == 0:
+            touches = 0
+            reactions = 0
+            breaks = 0
 
-        future = df.iloc[
-            confirmed_index + 1:
-        ]
+        else:
 
-        for _, candle in future.iterrows():
-
-            candle_high = float(candle["High"])
-            candle_low = float(candle["Low"])
-            candle_close = float(candle["Close"])
-
-            atr_now = candle["ATR"]
-
-            if pd.isna(atr_now) or atr_now <= 0:
-
-                continue
-
-            touched = (
-                candle_high >= lower
-                and candle_low <= upper
+            valid = (
+                np.isfinite(future_atr)
+                & (future_atr > 0)
             )
 
-            if touched:
+            touched = (
+                (future_highs >= lower)
+                & (future_lows <= upper)
+            )
 
-                touches += 1
-
-                reaction_seen = False
-
-            # ---------------------------------------------
-            # SUPPORT
-            # ---------------------------------------------
+            touches = int(
+                np.count_nonzero(touched & valid)
+            )
 
             if pivot["side"] == "SUPPORT":
 
-                if candle_close < lower:
+                broken = future_closes < lower
 
-                    breaks += 1
-
-                elif (
+                reacted = (
                     touched
-                    and candle_close > upper
-                    and candle_close - upper
-                    >= atr_now * reaction_atr
-                ):
+                    & (future_closes > upper)
+                    & (
+                        future_closes - upper
+                        >= future_atr * reaction_atr
+                    )
+                )
 
-                    reactions += 1
+            else:
 
-            # ---------------------------------------------
-            # RESISTANCE
-            # ---------------------------------------------
+                broken = future_closes > upper
 
-            elif pivot["side"] == "RESISTANCE":
-
-                if candle_close > upper:
-
-                    breaks += 1
-
-                elif (
+                reacted = (
                     touched
-                    and candle_close < lower
-                    and lower - candle_close
-                    >= atr_now * reaction_atr
-                ):
+                    & (future_closes < lower)
+                    & (
+                        lower - future_closes
+                        >= future_atr * reaction_atr
+                    )
+                )
 
-                    reactions += 1
+            breaks = int(
+                np.count_nonzero(broken & valid)
+            )
+
+            reactions = int(
+                np.count_nonzero(reacted & valid)
+            )
 
         # =================================================
         # ZONE CLASSIFICATION
         # =================================================
 
         if breaks > 0:
-
             status = "BROKEN"
 
         elif touches == 0:
-
             status = "FRESH"
 
         elif reactions >= 3:
-
             status = "REPEATED REACTIONS"
 
         elif reactions >= 1:
-
             status = "REACTED"
 
         else:
-
             status = "TESTED"
 
         # =================================================
@@ -266,19 +243,15 @@ def analyze_sr(
         # =================================================
 
         if breaks > 0:
-
             strength = "Invalidated"
 
         elif reactions >= 3:
-
             strength = "High historical reaction"
 
         elif reactions >= 1:
-
             strength = "Moderate historical reaction"
 
         else:
-
             strength = "Unconfirmed"
 
         zones.append({
@@ -308,12 +281,10 @@ def analyze_sr(
         })
 
     if not zones:
-
         return pd.DataFrame()
 
     result = pd.DataFrame(zones)
 
-    # Newest confirmed zones first
     result = result.sort_values(
         "Confirmed Time",
         ascending=False
