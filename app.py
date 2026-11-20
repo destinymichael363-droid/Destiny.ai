@@ -4,12 +4,11 @@ import pandas as pd
 import yfinance as yf
 import plotly.graph_objects as go
 
-from strategy_engine import analyze_market as run_destiny_ai
+from strategy_engine import analyze_market
 
 
 # =========================================================
-# DESTINY AI - SCALPING ANALYSIS DASHBOARD
-# Historical market data + multi-timeframe analysis
+# DESTINY AI - MULTI-TIMEFRAME SCALPING ANALYSIS
 # =========================================================
 
 st.set_page_config(
@@ -28,7 +27,7 @@ MARKETS = {
         "XRP": "XRP-USD",
         "BNB": "BNB-USD",
         "Litecoin": "LTC-USD",
-        "Dogecoin": "DOGE-USD",
+        "Dogecoin": "DOGE-USD"
     },
     "Forex": {
         "EUR/USD": "EURUSD=X",
@@ -39,7 +38,7 @@ MARKETS = {
         "AUD/USD": "AUDUSD=X",
         "USD/CAD": "USDCAD=X",
         "USD/CHF": "USDCHF=X",
-        "NZD/USD": "NZDUSD=X",
+        "NZD/USD": "NZDUSD=X"
     },
     "Commodities": {
         "Gold": "GC=F",
@@ -48,17 +47,18 @@ MARKETS = {
         "Brent Oil": "BZ=F",
         "Natural Gas": "NG=F",
         "Platinum": "PL=F",
-        "Copper": "HG=F",
-    },
+        "Copper": "HG=F"
+    }
 }
 
 
 # =========================================================
-# DATA FUNCTIONS
+# MARKET DATA
 # =========================================================
 
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_market_data(symbol, interval, period):
+
     try:
         df = yf.Ticker(symbol).history(
             period=period,
@@ -82,11 +82,24 @@ def fetch_market_data(symbol, interval, period):
         if "Volume" not in df.columns:
             df["Volume"] = 0
 
-        df = df[["Open", "High", "Low", "Close", "Volume"]]
-        df = df.apply(pd.to_numeric, errors="coerce")
-        df = df.dropna(subset=required)
-        df = df[~df.index.duplicated(keep="last")]
+        df = df[
+            ["Open", "High", "Low", "Close", "Volume"]
+        ].copy()
+
+        for col in df.columns:
+            df[col] = pd.to_numeric(
+                df[col], errors="coerce"
+            )
+
+        df = df.dropna(
+            subset=["Open", "High", "Low", "Close"]
+        )
+
         df = df.sort_index()
+
+        df = df[
+            ~df.index.duplicated(keep="last")
+        ]
 
         return df
 
@@ -94,8 +107,8 @@ def fetch_market_data(symbol, interval, period):
         return pd.DataFrame()
 
 
-def remove_latest_intraday_candle(df):
-    """Conservatively exclude the latest possibly incomplete candle."""
+def remove_latest_candle(df):
+
     if df is None or df.empty or len(df) < 2:
         return pd.DataFrame()
 
@@ -103,11 +116,12 @@ def remove_latest_intraday_candle(df):
 
 
 def build_four_hour_data(hourly):
+
     if hourly is None or hourly.empty:
         return pd.DataFrame()
 
     try:
-        four_hour = hourly.resample(
+        result = hourly.resample(
             "4h",
             label="right",
             closed="right"
@@ -119,46 +133,65 @@ def build_four_hour_data(hourly):
             "Volume": "sum"
         })
 
-        four_hour = four_hour.dropna(
+        result = result.dropna(
             subset=["Open", "High", "Low", "Close"]
         )
 
-        # Exclude the latest potentially incomplete 4H candle.
-        if len(four_hour) > 1:
-            four_hour = four_hour.iloc[:-1]
+        # Exclude the latest potentially incomplete bar.
+        if len(result) > 1:
+            result = result.iloc[:-1]
 
-        return four_hour
+        return result
 
     except Exception:
         return pd.DataFrame()
 
 
+@st.cache_data(ttl=300, show_spinner=False)
 def load_all_timeframes(symbol):
+
     frames = {}
 
-    daily = fetch_market_data(symbol, "1d", "2y")
+    daily = fetch_market_data(
+        symbol, "1d", "2y"
+    )
 
     if not daily.empty:
-        # Exclude today's daily candle if it is still forming.
-        today = pd.Timestamp.now(tz="UTC").date()
+
+        today = pd.Timestamp.now(
+            tz="UTC"
+        ).date()
+
         if daily.index[-1].date() >= today:
             daily = daily.iloc[:-1].copy()
 
-    hourly = fetch_market_data(symbol, "1h", "730d")
-    hourly = remove_latest_intraday_candle(hourly)
+    hourly = fetch_market_data(
+        symbol, "1h", "730d"
+    )
 
-    fifteen = fetch_market_data(symbol, "15m", "60d")
-    fifteen = remove_latest_intraday_candle(fifteen)
+    hourly = remove_latest_candle(hourly)
 
-    five = fetch_market_data(symbol, "5m", "60d")
-    five = remove_latest_intraday_candle(five)
+    fifteen = fetch_market_data(
+        symbol, "15m", "60d"
+    )
 
-    one = fetch_market_data(symbol, "1m", "7d")
-    one = remove_latest_intraday_candle(one)
+    fifteen = remove_latest_candle(fifteen)
+
+    five = fetch_market_data(
+        symbol, "5m", "60d"
+    )
+
+    five = remove_latest_candle(five)
+
+    one = fetch_market_data(
+        symbol, "1m", "7d"
+    )
+
+    one = remove_latest_candle(one)
 
     frames["1D"] = daily
-    frames["1H"] = hourly
     frames["4H"] = build_four_hour_data(hourly)
+    frames["1H"] = hourly
     frames["15M"] = fifteen
     frames["5M"] = five
     frames["1M"] = one
@@ -167,41 +200,56 @@ def load_all_timeframes(symbol):
 
 
 # =========================================================
-# DISPLAY HELPERS
+# RUN THE EXISTING ENGINE ON EACH TIMEFRAME
 # =========================================================
 
-def get_value(data, keys, default="Not available"):
-    if not isinstance(data, dict):
-        return default
+def run_all_analyses(frames):
 
-    for key in keys:
-        value = data.get(key)
-        if value is not None:
-            return value
+    results = {}
 
-    return default
+    for timeframe in TIMEFRAMES:
+
+        data = frames.get(
+            timeframe,
+            pd.DataFrame()
+        )
+
+        if data is None or data.empty:
+
+            results[timeframe] = {
+                "status": "UNAVAILABLE",
+                "error": "No genuine market data available."
+            }
+
+            continue
+
+        try:
+
+            result = analyze_market(data)
+
+            results[timeframe] = {
+                "status": "ANALYSED",
+                "data": result,
+                "error": None
+            }
+
+        except Exception as error:
+
+            results[timeframe] = {
+                "status": "ERROR",
+                "error": str(error)
+            }
+
+    return results
 
 
-def get_timeframe_result(result, timeframe):
-    if not isinstance(result, dict):
-        return {}
+# =========================================================
+# CHART WITH OB, FVG AND LIQUIDITY OVERLAYS
+# =========================================================
 
-    possible_sections = [
-        result.get("timeframes"),
-        result.get("timeframe_analysis"),
-        result.get("analyses"),
-    ]
+def display_chart(data, result, symbol, timeframe):
 
-    for section in possible_sections:
-        if isinstance(section, dict):
-            if timeframe in section:
-                return section[timeframe]
-
-    return {}
-
-
-def display_candlestick_chart(df, symbol, timeframe):
-    chart_data = df.tail(180).copy()
+    chart_data = data.tail(180).copy()
 
     fig = go.Figure()
 
@@ -221,27 +269,121 @@ def display_candlestick_chart(df, symbol, timeframe):
         )
     )
 
+    # Draw recent OB and FVG zones.
+
+    setups = result.get("setups", pd.DataFrame())
+
+    if not setups.empty:
+
+        for _, setup in setups.tail(6).iterrows():
+
+            bullish = (
+                setup.get("direction") == "BULLISH"
+            )
+
+            color = (
+                "rgba(22,163,106,0.16)"
+                if bullish
+                else "rgba(224,82,82,0.16)"
+            )
+
+            ob_time = setup.get("ob_time")
+
+            if pd.isna(ob_time):
+                continue
+
+            fig.add_shape(
+                type="rect",
+                x0=ob_time,
+                x1=chart_data.index[-1],
+                y0=setup["ob_low"],
+                y1=setup["ob_high"],
+                fillcolor=color,
+                line=dict(width=1),
+                layer="below"
+            )
+
+            fvg_time = setup.get("fvg_time")
+
+            if pd.notna(fvg_time):
+
+                fig.add_shape(
+                    type="rect",
+                    x0=fvg_time,
+                    x1=chart_data.index[-1],
+                    y0=setup["fvg_low"],
+                    y1=setup["fvg_high"],
+                    fillcolor="rgba(230,180,50,0.13)",
+                    line=dict(
+                        color="rgba(230,180,50,0.7)",
+                        width=1
+                    ),
+                    layer="below"
+                )
+
+    # Draw active BSL and SSL levels.
+
+    liquidity = result.get(
+        "liquidity",
+        pd.DataFrame()
+    )
+
+    if not liquidity.empty:
+
+        active = liquidity[
+            liquidity["swept"] == False
+        ].tail(8)
+
+        for _, level in active.iterrows():
+
+            price = level.get("price")
+
+            if pd.isna(price):
+                continue
+
+            side = level.get("side")
+
+            color = (
+                "#E05252"
+                if side == "BSL"
+                else "#16A36A"
+            )
+
+            fig.add_hline(
+                y=price,
+                line_dash="dot",
+                line_color=color,
+                line_width=1,
+                annotation_text=str(side),
+                annotation_position="top right"
+            )
+
     fig.update_layout(
-        title=f"{symbol}  |  {timeframe}",
+        title=f"{symbol} | {timeframe}",
         height=560,
         autosize=True,
         template="plotly_dark",
-        margin=dict(l=15, r=15, t=55, b=15),
+        margin=dict(
+            l=15,
+            r=20,
+            t=55,
+            b=15
+        ),
         font=dict(size=14),
         xaxis=dict(
             title="Time",
-            showgrid=True,
-            gridcolor="rgba(130,130,130,0.15)",
             rangeslider=dict(visible=False),
             tickfont=dict(size=12),
+            showgrid=True,
+            gridcolor="rgba(130,130,130,0.15)",
             automargin=True
         ),
         yaxis=dict(
             title="Price",
             side="right",
+            tickfont=dict(size=13),
             showgrid=True,
             gridcolor="rgba(130,130,130,0.15)",
-            tickfont=dict(size=13),
             automargin=True
         ),
         showlegend=False,
@@ -260,15 +402,62 @@ def display_candlestick_chart(df, symbol, timeframe):
 
 
 # =========================================================
+# TIMEFRAME STATISTICS
+# =========================================================
+
+def get_statistics(results):
+
+    rows = []
+
+    for timeframe in TIMEFRAMES:
+
+        item = results.get(timeframe, {})
+
+        if item.get("status") != "ANALYSED":
+
+            rows.append({
+                "Timeframe": timeframe,
+                "Status": item.get("status", "UNKNOWN"),
+                "Candles": 0,
+                "Bullish BOS": 0,
+                "Bearish BOS": 0,
+                "Qualified Setups": 0,
+                "Active Setups": 0
+            })
+
+            continue
+
+        result = item["data"]
+
+        candles = result["candles"]
+        stats = result["statistics"]
+
+        rows.append({
+            "Timeframe": timeframe,
+            "Status": "ANALYSED",
+            "Candles": len(candles),
+            "Bullish BOS": stats["bullish_bos"],
+            "Bearish BOS": stats["bearish_bos"],
+            "Qualified Setups": stats["total_qualified_setups"],
+            "Active Setups": stats["active_setups"]
+        })
+
+    return pd.DataFrame(rows)
+
+
+# =========================================================
 # APP HEADER
 # =========================================================
 
 st.title("DESTINY AI")
-st.caption("Multi-timeframe scalping analysis dashboard")
+
+st.caption(
+    "Multi-timeframe scalping analysis dashboard"
+)
 
 st.info(
-    "Historical market analysis and paper-testing only. "
-    "Signals are educational analysis, not guaranteed outcomes."
+    "Historical market analysis and paper-testing. "
+    "This application does not execute transactions."
 )
 
 
@@ -279,14 +468,16 @@ st.info(
 left, right = st.columns(2)
 
 with left:
+
     market_type = st.selectbox(
-        "Market",
+        "Select market",
         list(MARKETS.keys())
     )
 
 with right:
+
     asset_name = st.selectbox(
-        "Instrument",
+        "Select instrument",
         list(MARKETS[market_type].keys())
     )
 
@@ -298,46 +489,71 @@ chart_timeframe = st.selectbox(
     index=2
 )
 
-if st.button("REFRESH MARKET DATA", use_container_width=True):
+if st.button(
+    "REFRESH MARKET DATA",
+    use_container_width=True
+):
+
     st.cache_data.clear()
     st.rerun()
 
 
 # =========================================================
-# LOAD DATA
+# LOAD ALL DATA
 # =========================================================
 
-with st.spinner("Loading historical market data..."):
+with st.spinner("Loading market data..."):
+
     frames = load_all_timeframes(symbol)
 
-available = [
-    tf for tf in TIMEFRAMES
-    if tf in frames and not frames[tf].empty
-]
 
-st.subheader("Market data status")
+# =========================================================
+# RUN ANALYSIS
+# =========================================================
+
+with st.spinner("Destiny AI is analysing available timeframes..."):
+
+    analyses = run_all_analyses(frames)
+
+
+# =========================================================
+# DATA STATUS
+# =========================================================
+
+st.divider()
+
+st.subheader("Market data availability")
 
 status_columns = st.columns(3)
 
 for index, timeframe in enumerate(TIMEFRAMES):
-    column = status_columns[index % 3]
-    data = frames.get(timeframe, pd.DataFrame())
 
-    with column:
+    data = frames.get(
+        timeframe,
+        pd.DataFrame()
+    )
+
+    with status_columns[index % 3]:
+
         if not data.empty:
+
             st.success(
-                f"{timeframe}: Available "
-                f"({len(data)} candles)"
+                f"{timeframe}: {len(data)} candles"
             )
+
         else:
-            st.warning(f"{timeframe}: Unavailable")
+
+            st.warning(
+                f"{timeframe}: Unavailable"
+            )
 
 
 # =========================================================
-# MAIN PRICE CHART
+# MAIN CHART
 # =========================================================
 
 st.divider()
+
 st.subheader("Price chart")
 
 selected_data = frames.get(
@@ -345,9 +561,21 @@ selected_data = frames.get(
     pd.DataFrame()
 )
 
-if not selected_data.empty:
-    display_candlestick_chart(
+selected_analysis = analyses.get(
+    chart_timeframe,
+    {}
+)
+
+if (
+    not selected_data.empty
+    and selected_analysis.get("status") == "ANALYSED"
+):
+
+    result = selected_analysis["data"]
+
+    display_chart(
         selected_data,
+        result,
         symbol,
         chart_timeframe
     )
@@ -359,176 +587,190 @@ if not selected_data.empty:
         f"{latest_close:,.5f}"
     )
 
-    csv_data = selected_data.to_csv().encode("utf-8")
-
     st.download_button(
-        "Download chart data (CSV)",
-        data=csv_data,
+        "Download OHLCV data",
+        data=selected_data.to_csv().encode("utf-8"),
         file_name=f"{symbol}_{chart_timeframe}.csv",
         mime="text/csv"
     )
 
-else:
+elif selected_data.empty:
+
     st.warning(
-        f"No genuine {chart_timeframe} data is currently "
-        "available for this instrument."
+        f"No genuine {chart_timeframe} data is available."
+    )
+
+else:
+
+    st.error(
+        selected_analysis.get(
+            "error",
+            "Analysis could not be completed."
+        )
     )
 
 
 # =========================================================
-# DESTINY AI MULTI-TIMEFRAME ENGINE
+# MULTI-TIMEFRAME DASHBOARD
 # =========================================================
 
 st.divider()
-st.subheader("Destiny AI analysis")
 
-if len(available) == 6:
+st.subheader("Multi-timeframe analysis")
 
-    with st.spinner("Analysing all six timeframes..."):
-        try:
-            analysis = run_destiny_ai(frames)
+summary = get_statistics(analyses)
 
-            if isinstance(analysis, dict):
+st.dataframe(
+    summary,
+    use_container_width=True,
+    hide_index=True
+)
 
-                decision = get_value(
-                    analysis,
-                    ["decision", "overall_decision", "status"]
-                )
 
-                direction = get_value(
-                    analysis,
-                    ["direction", "bias", "market_direction"]
-                )
+# =========================================================
+# INDIVIDUAL TIMEFRAME RESULTS
+# =========================================================
 
-                reason = get_value(
-                    analysis,
-                    ["reason", "explanation", "summary"]
-                )
+st.subheader("Detailed timeframe results")
 
-                st.markdown("### Overall assessment")
+for timeframe in TIMEFRAMES:
 
-                a, b = st.columns(2)
+    item = analyses.get(timeframe, {})
 
-                with a:
-                    st.metric("Decision", str(decision))
+    with st.expander(
+        f"{timeframe} analysis",
+        expanded=(timeframe == "1H")
+    ):
 
-                with b:
-                    st.metric("Market direction", str(direction))
+        if item.get("status") == "UNAVAILABLE":
 
-                st.write("**Analysis explanation:**")
-                st.write(reason)
+            st.warning(item.get("error"))
 
-                st.markdown("### Timeframe breakdown")
+            continue
 
-                for timeframe in TIMEFRAMES:
-                    details = get_timeframe_result(
-                        analysis,
-                        timeframe
-                    )
+        if item.get("status") == "ERROR":
 
-                    with st.expander(
-                        f"{timeframe} analysis",
-                        expanded=(timeframe == "1H")
-                    ):
+            st.error(item.get("error"))
 
-                        if isinstance(details, dict) and details:
-                            st.write(
-                                "**Direction:**",
-                                get_value(
-                                    details,
-                                    ["direction", "bias", "trend"]
-                                )
-                            )
+            continue
 
-                            st.write(
-                                "**Structure:**",
-                                get_value(
-                                    details,
-                                    ["structure", "market_structure"]
-                                )
-                            )
+        result = item["data"]
 
-                            st.write(
-                                "**Decision:**",
-                                get_value(
-                                    details,
-                                    ["decision", "status"]
-                                )
-                            )
+        stats = result["statistics"]
 
-                            st.write(
-                                "**Reason:**",
-                                get_value(
-                                    details,
-                                    ["reason", "explanation", "summary"]
-                                )
-                            )
+        a, b, c = st.columns(3)
 
-                        else:
-                            st.write(
-                                "The engine did not return a separate "
-                                "breakdown for this timeframe."
-                            )
+        with a:
 
-                with st.expander("Full engine output"):
-                    st.json(analysis)
-
-            else:
-                st.write(analysis)
-
-        except Exception as error:
-            st.error(
-                "The strategy engine returned an error. "
-                "Check that strategy_engine.py is saved correctly."
+            st.metric(
+                "Bullish BOS",
+                stats["bullish_bos"]
             )
-            st.code(str(error))
 
-else:
-    missing = [
-        tf for tf in TIMEFRAMES
-        if frames.get(tf, pd.DataFrame()).empty
-    ]
+        with b:
 
-    st.warning(
-        "Destiny AI needs all six genuine timeframes before "
-        "it can produce a complete multi-timeframe assessment."
-    )
+            st.metric(
+                "Bearish BOS",
+                stats["bearish_bos"]
+            )
 
-    st.write("Unavailable timeframes:", ", ".join(missing))
+        with c:
 
-    st.info(
-        "The app will not manufacture missing candles or "
-        "pretend that a different timeframe is equivalent."
-    )
+            st.metric(
+                "Qualified setups",
+                stats["total_qualified_setups"]
+            )
+
+        st.write("**Active setups:**", stats["active_setups"])
+
+        st.write(
+            "**Invalidated setups:**",
+            stats["invalidated_setups"]
+        )
+
+        st.write(
+            "**Active BSL levels:**",
+            stats["active_bsl_levels"]
+        )
+
+        st.write(
+            "**Active SSL levels:**",
+            stats["active_ssl_levels"]
+        )
+
+        setups = result["setups"]
+
+        if not setups.empty:
+
+            st.write("**Qualified OB + FVG setups**")
+
+            st.dataframe(
+                setups,
+                use_container_width=True,
+                hide_index=True
+            )
+
+        else:
+
+            st.info(
+                "No qualified OB + FVG setups were detected "
+                "in this timeframe's available history."
+            )
+
+        liquidity = result["liquidity"]
+
+        if not liquidity.empty:
+
+            st.write("**BSL / SSL liquidity history**")
+
+            st.dataframe(
+                liquidity.tail(30),
+                use_container_width=True,
+                hide_index=True
+            )
 
 
 # =========================================================
-# DATA NOTES
+# DATA LIMITATIONS
 # =========================================================
 
 st.divider()
 
-with st.expander("Data and analysis limitations"):
+with st.expander("Data and engine information"):
+
     st.write(
-        "- Data is retrieved from Yahoo Finance through yfinance."
-    )
-    st.write(
-        "- Intraday data availability depends on the instrument "
-        "and the data provider."
-    )
-    st.write(
-        "- The 4H chart is constructed from 1H candles."
-    )
-    st.write(
-        "- The latest potentially incomplete intraday candles "
-        "are excluded."
-    )
-    st.write(
-        "- Historical data may be delayed, incomplete or revised."
-    )
-    st.write(
-        "- This application does not connect to a broker or "
-        "execute transactions."
+        "Market data source: Yahoo Finance through yfinance."
     )
 
-st.caption("Destiny AI | Historical analysis and paper-testing")
+    st.write(
+        "The 4H timeframe is constructed from 1H candles."
+    )
+
+    st.write(
+        "The latest potentially incomplete intraday candle "
+        "is excluded."
+    )
+
+    st.write(
+        "Each timeframe is analysed independently using "
+        "the existing analyze_market() engine."
+    )
+
+    st.write(
+        "The current engine detects BOS, qualified OB/FVG "
+        "overlap, BSL/SSL liquidity and setup invalidation."
+    )
+
+    st.write(
+        "A combined higher-timeframe decision system and "
+        "dedicated support/resistance classifier are not "
+        "yet implemented in this engine."
+    )
+
+    st.write(
+        "Unavailable data is never replaced with fabricated candles."
+    )
+
+st.caption(
+    "DESTINY AI | Historical market analysis"
+)
