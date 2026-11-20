@@ -1,4 +1,3 @@
-
 from mtf_context import build_mtf_context
 import streamlit as st
 import pandas as pd
@@ -6,7 +5,6 @@ import yfinance as yf
 import plotly.graph_objects as go
 
 from strategy_engine import analyze_market
-
 
 # =========================================================
 # DESTINY AI - MAIN APPLICATION
@@ -54,14 +52,12 @@ MARKETS = {
     }
 }
 
-
 # =========================================================
 # DATA DOWNLOAD
 # =========================================================
 
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_market_data(symbol, interval, period):
-
     try:
         df = yf.Ticker(symbol).history(
             period=period,
@@ -78,26 +74,18 @@ def fetch_market_data(symbol, interval, period):
             df.columns = df.columns.get_level_values(0)
 
         required = ["Open", "High", "Low", "Close"]
-
         if not all(column in df.columns for column in required):
             return pd.DataFrame()
 
         if "Volume" not in df.columns:
             df["Volume"] = 0
 
-        df = df[
-            ["Open", "High", "Low", "Close", "Volume"]
-        ].copy()
+        df = df[["Open", "High", "Low", "Close", "Volume"]].copy()
 
         for column in df.columns:
-            df[column] = pd.to_numeric(
-                df[column], errors="coerce"
-            )
+            df[column] = pd.to_numeric(df[column], errors="coerce")
 
-        df = df.dropna(
-            subset=["Open", "High", "Low", "Close"]
-        )
-
+        df = df.dropna(subset=["Open", "High", "Low", "Close"])
         df = df.sort_index()
         df = df[~df.index.duplicated(keep="last")]
 
@@ -108,15 +96,12 @@ def fetch_market_data(symbol, interval, period):
 
 
 def remove_latest_candle(df):
-
     if df is None or df.empty or len(df) < 2:
         return pd.DataFrame()
-
     return df.iloc[:-1].copy()
 
 
 def build_four_hour_data(hourly):
-
     if hourly is None or hourly.empty:
         return pd.DataFrame()
 
@@ -148,28 +133,27 @@ def build_four_hour_data(hourly):
 
 @st.cache_data(ttl=300, show_spinner=False)
 def load_all_timeframes(symbol):
-
     frames = {}
 
     daily = fetch_market_data(symbol, "1d", "2y")
 
     if not daily.empty:
         today_utc = pd.Timestamp.now(tz="UTC").date()
-
         if daily.index[-1].date() >= today_utc:
             daily = daily.iloc[:-1].copy()
 
-    hourly = fetch_market_data(symbol, "1h", "730d")
-    hourly = remove_latest_candle(hourly)
-
-    fifteen = fetch_market_data(symbol, "15m", "60d")
-    fifteen = remove_latest_candle(fifteen)
-
-    five = fetch_market_data(symbol, "5m", "60d")
-    five = remove_latest_candle(five)
-
-    one = fetch_market_data(symbol, "1m", "7d")
-    one = remove_latest_candle(one)
+    hourly = remove_latest_candle(
+        fetch_market_data(symbol, "1h", "730d")
+    )
+    fifteen = remove_latest_candle(
+        fetch_market_data(symbol, "15m", "60d")
+    )
+    five = remove_latest_candle(
+        fetch_market_data(symbol, "5m", "60d")
+    )
+    one = remove_latest_candle(
+        fetch_market_data(symbol, "1m", "7d")
+    )
 
     frames["1D"] = daily
     frames["4H"] = build_four_hour_data(hourly)
@@ -183,14 +167,18 @@ def load_all_timeframes(symbol):
 
 # =========================================================
 # MULTI-TIMEFRAME ANALYSIS ENGINE
+# SPEED CORRECTIONS:
+# 1. Cache completed timeframe analysis for 30 minutes.
+# 2. Analyse the latest 1,200 candles per timeframe.
+#    The original downloaded data remains available for charts
+#    and CSV downloads.
 # =========================================================
 
+@st.cache_data(ttl=1800, show_spinner=False)
 def run_all_analyses(frames):
-
     results = {}
 
     for timeframe in TIMEFRAMES:
-
         data = frames.get(timeframe, pd.DataFrame())
 
         if data is None or data.empty:
@@ -201,7 +189,8 @@ def run_all_analyses(frames):
             continue
 
         try:
-            result = analyze_market(data)
+            analysis_data = data.tail(1200).copy()
+            result = analyze_market(analysis_data)
 
             if not isinstance(result, dict):
                 raise ValueError(
@@ -225,18 +214,20 @@ def run_all_analyses(frames):
 
 # =========================================================
 # SELECTED-TIMEFRAME SUPPORT & RESISTANCE
+# SPEED CORRECTION:
+# Only the selected timeframe and latest 400 candles are used.
 # =========================================================
 
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=1800, show_spinner=False)
 def run_sr_analysis(data):
-
     from sr_engine import analyze_sr
 
     if data is None or data.empty:
         return pd.DataFrame()
 
     try:
-        zones = analyze_sr(data)
+        sr_input = data.tail(400).copy()
+        zones = analyze_sr(sr_input)
 
         if isinstance(zones, pd.DataFrame):
             return zones.head(8).copy()
@@ -252,12 +243,10 @@ def run_sr_analysis(data):
 # =========================================================
 
 def align_timestamp(value, reference):
-
     timestamp = pd.Timestamp(value)
 
     if reference.tzinfo is None and timestamp.tzinfo is not None:
         timestamp = timestamp.tz_localize(None)
-
     elif reference.tzinfo is not None and timestamp.tzinfo is None:
         timestamp = timestamp.tz_localize(reference.tzinfo)
 
@@ -269,7 +258,6 @@ def align_timestamp(value, reference):
 # =========================================================
 
 def display_chart(data, result, symbol, timeframe):
-
     chart_data = data.tail(120).copy()
 
     if chart_data.empty:
@@ -298,14 +286,10 @@ def display_chart(data, result, symbol, timeframe):
     )
 
     # ORDER BLOCK AND FAIR VALUE GAP OVERLAYS
-
     setups = result.get("setups", pd.DataFrame())
 
     required_setup_columns = [
-        "ob_time",
-        "ob_low",
-        "ob_high",
-        "direction"
+        "ob_time", "ob_low", "ob_high", "direction"
     ]
 
     if (
@@ -313,12 +297,9 @@ def display_chart(data, result, symbol, timeframe):
         and not setups.empty
         and all(column in setups.columns for column in required_setup_columns)
     ):
-
         for _, setup in setups.tail(30).iterrows():
-
             try:
                 ob_time = setup.get("ob_time")
-
                 if pd.isna(ob_time):
                     continue
 
@@ -334,7 +315,6 @@ def display_chart(data, result, symbol, timeframe):
                     continue
 
                 bullish = setup.get("direction") == "BULLISH"
-
                 zone_color = (
                     "rgba(0,192,135,0.13)"
                     if bullish
@@ -354,21 +334,12 @@ def display_chart(data, result, symbol, timeframe):
 
                 if all(
                     column in setups.columns
-                    for column in [
-                        "fvg_time",
-                        "fvg_low",
-                        "fvg_high"
-                    ]
+                    for column in ["fvg_time", "fvg_low", "fvg_high"]
                 ):
-
                     fvg_time = setup.get("fvg_time")
 
                     if pd.notna(fvg_time):
-
-                        fvg_time = align_timestamp(
-                            fvg_time, start_time
-                        )
-
+                        fvg_time = align_timestamp(fvg_time, start_time)
                         fvg_low = float(setup["fvg_low"])
                         fvg_high = float(setup["fvg_high"])
 
@@ -376,7 +347,6 @@ def display_chart(data, result, symbol, timeframe):
                             start_time <= fvg_time <= end_time
                             and fvg_low < fvg_high
                         ):
-
                             fig.add_shape(
                                 type="rect",
                                 x0=fvg_time,
@@ -395,7 +365,6 @@ def display_chart(data, result, symbol, timeframe):
                 continue
 
     # BSL AND SSL LEVELS
-
     liquidity = result.get("liquidity", pd.DataFrame())
 
     if (
@@ -404,26 +373,16 @@ def display_chart(data, result, symbol, timeframe):
         and "swept" in liquidity.columns
         and "price" in liquidity.columns
     ):
-
-        active = liquidity[
-            liquidity["swept"] == False
-        ].tail(6)
+        active = liquidity[liquidity["swept"] == False].tail(6)
 
         for _, level in active.iterrows():
-
             try:
                 price = float(level["price"])
-
                 if pd.isna(price):
                     continue
 
                 side = level.get("side")
-
-                color = (
-                    "#F04452"
-                    if side == "BSL"
-                    else "#00C087"
-                )
+                color = "#F04452" if side == "BSL" else "#00C087"
 
                 fig.add_hline(
                     y=price,
@@ -436,7 +395,6 @@ def display_chart(data, result, symbol, timeframe):
                 continue
 
     # CHART APPEARANCE
-
     fig.update_layout(
         title=dict(
             text=f"{symbol} | {timeframe}",
@@ -494,15 +452,12 @@ def display_chart(data, result, symbol, timeframe):
 # =========================================================
 
 def get_statistics(results):
-
     rows = []
 
     for timeframe in TIMEFRAMES:
-
         item = results.get(timeframe, {})
 
         if item.get("status") != "ANALYSED":
-
             rows.append({
                 "Timeframe": timeframe,
                 "Status": item.get("status", "UNKNOWN"),
@@ -512,7 +467,6 @@ def get_statistics(results):
                 "Qualified Setups": 0,
                 "Active Setups": 0
             })
-
             continue
 
         result = item["data"]
@@ -536,7 +490,6 @@ def get_statistics(results):
 # =========================================================
 
 st.title("DESTINY AI")
-
 st.caption("Multi-timeframe historical market analysis")
 
 st.info(
@@ -640,11 +593,9 @@ st.subheader("Market data availability")
 status_columns = st.columns(3)
 
 for index, timeframe in enumerate(TIMEFRAMES):
-
     data = frames.get(timeframe, pd.DataFrame())
 
     with status_columns[index % 3]:
-
         if not data.empty:
             st.success(f"{timeframe}: {len(data)} candles")
         else:
@@ -658,16 +609,12 @@ for index, timeframe in enumerate(TIMEFRAMES):
 st.divider()
 st.subheader("Price chart")
 
-selected_analysis = analyses.get(
-    chart_timeframe,
-    {}
-)
+selected_analysis = analyses.get(chart_timeframe, {})
 
 if (
     not selected_data.empty
     and selected_analysis.get("status") == "ANALYSED"
 ):
-
     result = selected_analysis["data"]
 
     display_chart(
@@ -692,13 +639,11 @@ if (
     )
 
 elif selected_data.empty:
-
     st.warning(
         f"No genuine {chart_timeframe} data is currently available."
     )
 
 else:
-
     st.error(
         selected_analysis.get(
             "error",
@@ -715,7 +660,6 @@ st.divider()
 st.subheader("Destiny AI — MTF Structure Context")
 
 try:
-
     mtf_context = build_mtf_context(analyses)
 
     st.caption(
@@ -726,7 +670,6 @@ try:
     )
 
     st.markdown("### Higher Timeframe Context")
-
     st.info(
         mtf_context.get(
             "higher_timeframe_summary",
@@ -735,7 +678,6 @@ try:
     )
 
     st.markdown("### Lower Timeframe Context")
-
     st.info(
         mtf_context.get(
             "lower_timeframe_summary",
@@ -746,20 +688,14 @@ try:
     mtf_rows = []
 
     for timeframe in TIMEFRAMES:
-
-        item = mtf_context.get(
-            "timeframes", {}
-        ).get(timeframe, {})
+        item = mtf_context.get("timeframes", {}).get(timeframe, {})
 
         mtf_rows.append({
             "Timeframe": timeframe,
             "Status": item.get("status", "Unavailable"),
             "Bullish BOS": item.get("bullish_bos", 0),
             "Bearish BOS": item.get("bearish_bos", 0),
-            "Structure": item.get(
-                "structure",
-                "Insufficient data"
-            )
+            "Structure": item.get("structure", "Insufficient data")
         })
 
     mtf_table = pd.DataFrame(mtf_rows)
@@ -776,7 +712,6 @@ try:
     )
 
 except Exception as error:
-
     st.error("MTF context could not be generated.")
     st.caption(str(error))
 
@@ -790,9 +725,9 @@ st.divider()
 st.subheader("Historical Support & Resistance Zones")
 
 if isinstance(sr_selected, pd.DataFrame) and not sr_selected.empty:
-
     st.caption(
-        f"Up to 8 historical S/R zones detected on {chart_timeframe}."
+        f"Up to 8 historical S/R zones detected on {chart_timeframe}. "
+        "The S/R calculation uses the latest 400 candles."
     )
 
     st.dataframe(
@@ -802,7 +737,6 @@ if isinstance(sr_selected, pd.DataFrame) and not sr_selected.empty:
     )
 
 else:
-
     st.info(
         "No historical S/R zones are available "
         "for this timeframe."
@@ -831,14 +765,12 @@ st.dataframe(
 st.subheader("Detailed timeframe results")
 
 for timeframe in TIMEFRAMES:
-
     item = analyses.get(timeframe, {})
 
     with st.expander(
         f"{timeframe} analysis",
         expanded=(timeframe == "1H")
     ):
-
         if item.get("status") == "UNAVAILABLE":
             st.warning(item.get("error"))
             continue
@@ -853,16 +785,10 @@ for timeframe in TIMEFRAMES:
         a, b, c = st.columns(3)
 
         with a:
-            st.metric(
-                "Bullish BOS",
-                stats.get("bullish_bos", 0)
-            )
+            st.metric("Bullish BOS", stats.get("bullish_bos", 0))
 
         with b:
-            st.metric(
-                "Bearish BOS",
-                stats.get("bearish_bos", 0)
-            )
+            st.metric("Bearish BOS", stats.get("bearish_bos", 0))
 
         with c:
             st.metric(
@@ -893,7 +819,6 @@ for timeframe in TIMEFRAMES:
         setups = result.get("setups", pd.DataFrame())
 
         if isinstance(setups, pd.DataFrame) and not setups.empty:
-
             st.write("**Qualified OB + FVG setups**")
 
             st.dataframe(
@@ -901,18 +826,15 @@ for timeframe in TIMEFRAMES:
                 use_container_width=True,
                 hide_index=True
             )
-
         else:
-
             st.info(
                 "No qualified OB + FVG setups were detected "
-                "in the available history."
+                "in the available analysis window."
             )
 
         liquidity = result.get("liquidity", pd.DataFrame())
 
         if isinstance(liquidity, pd.DataFrame) and not liquidity.empty:
-
             st.write("**BSL / SSL liquidity history**")
 
             st.dataframe(
@@ -929,44 +851,28 @@ for timeframe in TIMEFRAMES:
 st.divider()
 
 with st.expander("Data and engine information"):
-
-    st.write(
-        "Market data source: Yahoo Finance through yfinance."
-    )
-
-    st.write(
-        "The 4H timeframe is constructed from 1H candles."
-    )
-
-    st.write(
-        "The latest potentially incomplete intraday candle is excluded."
-    )
-
-    st.write(
-        "Each timeframe is analysed independently using analyze_market()."
-    )
-
+    st.write("Market data source: Yahoo Finance through yfinance.")
+    st.write("The 4H timeframe is constructed from 1H candles.")
+    st.write("The latest potentially incomplete intraday candle is excluded.")
+    st.write("Each timeframe is analysed independently using analyze_market().")
     st.write(
         "The existing engine detects BOS, qualified OB/FVG overlap, "
         "BSL/SSL liquidity and setup invalidation."
     )
-
+    st.write(
+        "The detailed strategy analysis uses the latest 1,200 candles "
+        "per timeframe to reduce processing time."
+    )
     st.write(
         "The support/resistance engine calculates zones only "
         "for the currently selected chart timeframe."
     )
-
-    st.write(
-        "A maximum of 8 S/R zones is displayed."
-    )
-
+    st.write("The S/R calculation uses the latest 400 candles.")
+    st.write("A maximum of 8 S/R zones is displayed.")
     st.write(
         "Yahoo Finance may not provide every timeframe for every instrument."
     )
-
-    st.write(
-        "Unavailable data is never replaced with fabricated candles."
-    )
+    st.write("Unavailable data is never replaced with fabricated candles.")
 
 st.caption(
     "DESTINY AI | Historical market analysis and paper-testing"
