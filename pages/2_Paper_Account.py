@@ -1,10 +1,11 @@
-import secrets
+
 from auth_guard import require_login
 from auth import get_authenticated_supabase
 
 import streamlit as st
 import pandas as pd
 import urllib.request
+import secrets
 from datetime import datetime, timezone
 
 
@@ -54,7 +55,7 @@ try:
     supabase = get_authenticated_supabase()
 
     if supabase is None:
-        st.error("Your login session is unavailable. Please log in again.")
+        st.error("Please log in again.")
         st.stop()
 
     user_id = st.session_state.get("supabase_user")
@@ -64,13 +65,13 @@ try:
         st.stop()
 
 except Exception as error:
-    st.error("Could not connect to your authenticated database.")
+    st.error("Database connection failed.")
     st.caption(str(error))
     st.stop()
 
 
 # ==========================================
-# LOAD OR CREATE USER ACCOUNT
+# LOAD OR CREATE ACCOUNT
 # ==========================================
 
 def load_paper_account():
@@ -78,27 +79,32 @@ def load_paper_account():
     result = (
         supabase
         .table("paper_account")
-        .select("balance, transactions, notification_topic")
+        .select(
+            "balance, transactions, notification_topic"
+        )
         .eq("user_id", user_id)
         .limit(1)
         .execute()
     )
 
     if result.data:
-    account = result.data[0]
 
-    if not account.get("notification_topic"):
-        topic = secrets.token_urlsafe(32)
+        account = result.data[0]
 
-        supabase.table("paper_account").update({
-            "notification_topic": topic
-        }).eq("user_id", user_id).execute()
+        # Give existing accounts a notification topic
+        if not account.get("notification_topic"):
 
-        account["notification_topic"] = topic
+            topic = secrets.token_urlsafe(32)
 
-    return account
-        return result.data[0]
+            supabase.table("paper_account").update({
+                "notification_topic": topic
+            }).eq("user_id", user_id).execute()
 
+            account["notification_topic"] = topic
+
+        return account
+
+    # Create a new account
     initial_history = [{
         "Time (UTC)": current_time(),
         "Type": "Starting virtual balance",
@@ -110,6 +116,7 @@ def load_paper_account():
         "user_id": user_id,
         "balance": 10000.00,
         "transactions": initial_history,
+        "notification_topic": secrets.token_urlsafe(32),
     }
 
     created = (
@@ -120,10 +127,14 @@ def load_paper_account():
     )
 
     if not created.data:
-        raise Exception("Could not create your virtual account.")
+        raise Exception("Account creation was not confirmed.")
 
     return created.data[0]
 
+
+# ==========================================
+# SAVE ACCOUNT
+# ==========================================
 
 def save_paper_account(balance, transactions):
 
@@ -133,25 +144,35 @@ def save_paper_account(balance, transactions):
         .update({
             "balance": float(balance),
             "transactions": transactions,
-            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "updated_at": datetime.now(
+                timezone.utc
+            ).isoformat(),
         })
         .eq("user_id", user_id)
         .execute()
     )
 
     if not result.data:
-        raise Exception(
-            "Database did not confirm the account update."
-        )
+        raise Exception("Database did not confirm the update.")
 
+
+# ==========================================
+# LOAD USER DATA
+# ==========================================
 
 try:
+
     account = load_paper_account()
 
     paper_balance = float(account["balance"])
     paper_transactions = account["transactions"] or []
+    notification_topic = account["notification_topic"]
+
+    if not notification_topic:
+        raise Exception("Notification topic could not be created.")
 
 except Exception as error:
+
     st.error("Could not load your virtual account.")
     st.caption(str(error))
     st.stop()
@@ -164,13 +185,9 @@ except Exception as error:
 def send_app_notification(title, message):
 
     try:
-        topic = st.secrets.get("NTFY_TOPIC", "").strip()
-
-        if not topic:
-            return False, "NTFY_TOPIC is missing from Secrets."
 
         request = urllib.request.Request(
-            f"https://ntfy.sh/{topic}",
+            f"https://ntfy.sh/{notification_topic}",
             data=message.encode("utf-8"),
             headers={"Title": title},
             method="POST",
@@ -183,9 +200,10 @@ def send_app_notification(title, message):
             if response.status in (200, 201):
                 return True, "Notification sent."
 
-            return False, f"Server returned status {response.status}."
+            return False, f"Server status {response.status}."
 
     except Exception as error:
+
         return False, str(error)
 
 
@@ -298,9 +316,10 @@ if submitted:
 
     try:
 
-        save_paper_account(new_balance, new_history)
-
-        st.success("Virtual account saved successfully.")
+        save_paper_account(
+            new_balance,
+            new_history
+        )
 
         notification_ok, notification_message = (
             send_app_notification(
@@ -308,17 +327,17 @@ if submitted:
                 (
                     f"{transaction_type}\n"
                     f"Amount: ${amount:,.2f}\n"
-                    f"New virtual balance: ${new_balance:,.2f}"
+                    f"New virtual balance: "
+                    f"${new_balance:,.2f}"
                 ),
             )
         )
 
         if notification_ok:
-            st.success("Android notification sent.")
+            st.success("Virtual account saved. Notification sent.")
         else:
-            st.warning(
-                "Account saved, but notification failed."
-            )
+            st.success("Virtual account saved successfully.")
+            st.warning("Notification could not be sent.")
             st.caption(notification_message)
 
         st.rerun()
@@ -382,7 +401,10 @@ if st.button(
 
     try:
 
-        save_paper_account(10000.00, reset_history)
+        save_paper_account(
+            10000.00,
+            reset_history
+        )
 
         st.success("Virtual account reset successfully.")
         st.rerun()
@@ -394,10 +416,22 @@ if st.button(
 
 
 # ==========================================
-# FOOTER
+# NOTIFICATION INFORMATION
 # ==========================================
 
+st.divider()
+
+st.subheader("Your notification channel")
+
 st.caption(
-    "Virtual account balance and history are stored "
-    "in your Supabase account. This is not a live broker account."
+    "This is your account-specific ntfy topic. "
+    "Keep it private. Anyone who obtains it may subscribe."
+)
+
+st.code(notification_topic)
+
+st.caption(
+    "Virtual balance and transaction history are stored "
+    "in your individual Supabase account. "
+    "This is not a live broker account."
 )
