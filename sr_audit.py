@@ -403,10 +403,7 @@ def main():
             broken_zones = engine.analyze_sr(
                 broken_data, pivot_length=8
             )
-
-            intact_zones = engine.analyze_sr(
-                intact_data, pivot_length=8
-            )
+            intact_zones["Pivot Time"].astype(str).eq(pivot_time)
 
             pivot_time = str(
                 broken_data.index[pivot_i]
