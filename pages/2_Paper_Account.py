@@ -57,7 +57,7 @@ def send_app_notification(title, message):
 # PAPER ACCOUNT
 # ==========================================
 
-st.title("DESTINY AI — PAPER ACCOUNT")
+st.title("DESTINY AI - PAPER ACCOUNT")
 
 st.caption(
     "A virtual account for learning and historical testing."
@@ -174,7 +174,7 @@ if submitted:
         "Virtual balance": st.session_state.paper_balance,
     })
 
-    st.success("Virtual account updated.")
+ PAPER.success("Virtual account updated.")
 
     notification_sent = send_app_notification(
         "Destiny AI — Paper Account",
