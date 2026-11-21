@@ -78,7 +78,7 @@ def load_paper_account():
     result = (
         supabase
         .table("paper_account")
-        .select("balance, transactions")
+        .select("balance, transactions, notification_topic")
         .eq("user_id", user_id)
         .limit(1)
         .execute()
