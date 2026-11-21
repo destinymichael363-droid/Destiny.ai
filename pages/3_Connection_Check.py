@@ -1,9 +1,9 @@
-
+from auth_guard import require_login
 import streamlit as st
 from supabase import create_client
 
 st.set_page_config(page_title="Destiny AI Connection", layout="centered")
-
+require_login()
 st.title("DESTINY AI")
 st.subheader("Database Verification")
 
