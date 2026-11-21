@@ -51,20 +51,26 @@ MARKETS = {
 # OPTIONAL ANDROID APP-STATUS NOTIFICATION
 # =========================================================
 
+def send_app_notification(title_message)
+
 def send_app_notification(title, message):
     try:
         topic = st.secrets.get("NTFY_TOPIC", "").strip()
         if not topic:
             return False
+
         request = urllib.request.Request(
             f"https://ntfy.sh/{topic}",
             data=message.encode("utf-8"),
             headers={"Title": title},
             method="POST"
         )
+
         with urllib.request.urlopen(request, timeout=10) as response:
             return response.status in (200, 201)
-    except Exception:
+
+    except Exception as error:
+        st.error(f"Notification error: {error}")
         return False
 
 
