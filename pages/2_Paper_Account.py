@@ -85,6 +85,18 @@ def load_paper_account():
     )
 
     if result.data:
+    account = result.data[0]
+
+    if not account.get("notification_topic"):
+        topic = secrets.token_urlsafe(32)
+
+        supabase.table("paper_account").update({
+            "notification_topic": topic
+        }).eq("user_id", user_id).execute()
+
+        account["notification_topic"] = topic
+
+    return account
         return result.data[0]
 
     initial_history = [{
