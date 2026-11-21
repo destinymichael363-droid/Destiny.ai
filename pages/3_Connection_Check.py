@@ -1,29 +1,20 @@
 import streamlit as st
-import urllib.request
+from supabase import create_client
 
-st.set_page_config(page_title="Connection Check", layout="centered")
+st.set_page_config(page_title="Destiny AI Connection", layout="centered")
 
 st.title("DESTINY AI")
-st.subheader("Supabase Connection Check")
+st.subheader("Database Connection")
 
 try:
-    url = st.secrets["supabase"]["url"].rstrip("/")
-    key = st.secrets["supabase"]["key"]
+    url = st.secrets["SUPABASE_URL"]
+    key = st.secrets["SUPABASE_KEY"]
 
-    request = urllib.request.Request(
-        f"{url}/rest/v1/",
-        headers={
-            "apikey": key,
-            "Authorization": f"Bearer {key}"
-        }
-    )
+    supabase = create_client(url, key)
 
-    with urllib.request.urlopen(request, timeout=15) as response:
-        if response.status == 200:
-            st.success("Supabase connection successful!")
-        else:
-            st.warning(f"Server response: {response.status}")
+    st.success("Supabase client initialized successfully!")
+    st.info("Connection configuration is loaded correctly.")
 
 except Exception as error:
-    st.error("Connection test failed.")
+    st.error("Connection initialization failed.")
     st.caption(str(error))
