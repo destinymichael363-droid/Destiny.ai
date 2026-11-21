@@ -26,45 +26,70 @@ h2, h3 {font-size: 1.15rem !important;}
 """, unsafe_allow_html=True)
 
 
+# ==========================================
+# ANDROID NOTIFICATION CONNECTION
+# ==========================================
+
 def send_app_notification(title, message):
     try:
-        topic = st.secrets["NTFY_TOPIC"]
+        topic = st.secrets.get("NTFY_TOPIC", "").strip()
+
+        if not topic:
+            st.error("NTFY_TOPIC is missing from Streamlit Secrets.")
+            return False
 
         request = urllib.request.Request(
             f"https://ntfy.sh/{topic}",
             data=message.encode("utf-8"),
-            headers={
-                "Title": title,
-                "Priority": "default",
-            },
-            method="POST",
+            headers={"Title": title},
+            method="POST"
         )
 
         with urllib.request.urlopen(request, timeout=10) as response:
-            return response.status == 200
+            return response.status in (200, 201)
 
-    except Exception:
+    except Exception as error:
+        st.error(f"Notification error: {error}")
         return False
 
 
+# ==========================================
+# PAPER ACCOUNT
+# ==========================================
+
 st.title("DESTINY AI — PAPER ACCOUNT")
-st.caption("A virtual account for learning and historical testing.")
+
+st.caption(
+    "A virtual account for learning and historical testing."
+)
 
 st.warning(
-    "SIMULATION ONLY — No bank, broker, wallet or payment service "
-    "is connected. All balances are virtual."
+    "SIMULATION ONLY — No bank, broker, wallet or payment "
+    "service is connected. All balances are virtual."
 )
+
+
+# ==========================================
+# INITIAL ACCOUNT DATA
+# ==========================================
 
 if "paper_balance" not in st.session_state:
     st.session_state.paper_balance = 10000.00
 
 if "paper_transactions" not in st.session_state:
     st.session_state.paper_transactions = [{
-        "Time (UTC)": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M"),
+        "Time (UTC)": datetime.now(timezone.utc).strftime(
+            "%Y-%m-%d %H:%M"
+        ),
         "Type": "Starting virtual balance",
         "Amount": 10000.00,
         "Virtual balance": 10000.00,
     }]
+
+
+# ==========================================
+# ACCOUNT OVERVIEW
+# ==========================================
 
 st.subheader("Virtual account overview")
 
@@ -79,11 +104,16 @@ b.metric("Account type", "Paper only")
 
 st.divider()
 
+
+# ==========================================
+# SIMULATION CONTROLS
+# ==========================================
+
 st.subheader("Simulation controls")
 
 st.write(
-    "Adjust your practice balance. These are virtual changes, "
-    "not real financial transactions."
+    "Adjust your practice balance. These changes are "
+    "virtual and are not real financial transactions."
 )
 
 with st.form("paper_adjustment"):
@@ -106,6 +136,11 @@ with st.form("paper_adjustment"):
         use_container_width=True,
     )
 
+
+# ==========================================
+# PROCESS VIRTUAL ADJUSTMENT
+# ==========================================
+
 if submitted:
 
     amount = float(amount)
@@ -125,12 +160,15 @@ if submitted:
     else:
 
         st.error(
-            "The adjustment cannot exceed the current virtual balance."
+            "The adjustment cannot exceed the current "
+            "virtual balance."
         )
         st.stop()
 
     st.session_state.paper_transactions.insert(0, {
-        "Time (UTC)": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M"),
+        "Time (UTC)": datetime.now(timezone.utc).strftime(
+            "%Y-%m-%d %H:%M"
+        ),
         "Type": tx_type,
         "Amount": signed_amount,
         "Virtual balance": st.session_state.paper_balance,
@@ -149,13 +187,19 @@ if submitted:
     )
 
     if notification_sent:
-        st.info("Android notification sent.")
+        st.success("Android notification sent.")
     else:
         st.warning(
             "Account updated, but notification could not be sent."
         )
 
+
 st.divider()
+
+
+# ==========================================
+# TRANSACTION HISTORY
+# ==========================================
 
 st.subheader("Virtual transaction history")
 
@@ -169,6 +213,11 @@ st.dataframe(
     hide_index=True,
 )
 
+
+# ==========================================
+# CSV DOWNLOAD
+# ==========================================
+
 csv_data = history.to_csv(index=False).encode("utf-8")
 
 st.download_button(
@@ -179,6 +228,11 @@ st.download_button(
     use_container_width=True,
 )
 
+
+# ==========================================
+# RESET ACCOUNT
+# ==========================================
+
 if st.button(
     "Reset virtual account to $10,000",
     use_container_width=True,
@@ -187,7 +241,9 @@ if st.button(
     st.session_state.paper_balance = 10000.00
 
     st.session_state.paper_transactions = [{
-        "Time (UTC)": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M"),
+        "Time (UTC)": datetime.now(timezone.utc).strftime(
+            "%Y-%m-%d %H:%M"
+        ),
         "Type": "Virtual account reset",
         "Amount": 10000.00,
         "Virtual balance": 10000.00,
@@ -195,7 +251,13 @@ if st.button(
 
     st.rerun()
 
+
+# ==========================================
+# FOOTER
+# ==========================================
+
 st.caption(
-    "Virtual account values are stored in the current Streamlit session. "
-    "They may reset when the session restarts. This is not a live account."
+    "Virtual account values are stored in the current "
+    "Streamlit session and may reset when the session restarts. "
+    "This is not a live account."
 )
