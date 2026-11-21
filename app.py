@@ -432,7 +432,7 @@ def display_chart(data, result, sr_zones, symbol, timeframe):
         decreasing_line_color="#F05B65",
         increasing_fillcolor="#20C997",
         decreasing_fillcolor="#F05B65",
-        whiskerwidth=1.2,
+        whiskerwidth=1.0,
         hovertemplate=(
             "<b>%{x|%d %b %Y %H:%M}</b><br>"
             "Open: %{open:,.5f}<br>"
