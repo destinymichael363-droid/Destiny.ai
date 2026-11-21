@@ -174,7 +174,7 @@ if submitted:
         "Virtual balance": st.session_state.paper_balance,
     })
 
- PAPER.success("Virtual account updated.")
+     st.success("Virtual account updated.")
 
     notification_sent = send_app_notification(
         "Destiny AI — Paper Account",
