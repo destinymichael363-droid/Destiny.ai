@@ -28,32 +28,22 @@ TIMEFRAMES = ["1D", "4H", "1H", "15M", "5M", "1M"]
 
 MARKETS = {
     "Crypto": {
-        "Bitcoin": "BTC-USD",
-        "Ethereum": "ETH-USD",
-        "Solana": "SOL-USD",
-        "XRP": "XRP-USD",
-        "BNB": "BNB-USD",
-        "Litecoin": "LTC-USD",
+        "Bitcoin": "BTC-USD", "Ethereum": "ETH-USD",
+        "Solana": "SOL-USD", "XRP": "XRP-USD",
+        "BNB": "BNB-USD", "Litecoin": "LTC-USD",
         "Dogecoin": "DOGE-USD"
     },
     "Forex": {
-        "EUR/USD": "EURUSD=X",
-        "GBP/USD": "GBPUSD=X",
-        "USD/JPY": "USDJPY=X",
-        "GBP/JPY": "GBPJPY=X",
-        "EUR/JPY": "EURJPY=X",
-        "AUD/USD": "AUDUSD=X",
-        "USD/CAD": "USDCAD=X",
-        "USD/CHF": "USDCHF=X",
+        "EUR/USD": "EURUSD=X", "GBP/USD": "GBPUSD=X",
+        "USD/JPY": "USDJPY=X", "GBP/JPY": "GBPJPY=X",
+        "EUR/JPY": "EURJPY=X", "AUD/USD": "AUDUSD=X",
+        "USD/CAD": "USDCAD=X", "USD/CHF": "USDCHF=X",
         "NZD/USD": "NZDUSD=X"
     },
     "Commodities": {
-        "Gold": "GC=F",
-        "Silver": "SI=F",
-        "Crude Oil": "CL=F",
-        "Brent Oil": "BZ=F",
-        "Natural Gas": "NG=F",
-        "Platinum": "PL=F",
+        "Gold": "GC=F", "Silver": "SI=F",
+        "Crude Oil": "CL=F", "Brent Oil": "BZ=F",
+        "Natural Gas": "NG=F", "Platinum": "PL=F",
         "Copper": "HG=F"
     }
 }
@@ -68,17 +58,14 @@ def send_app_notification(title, message):
         topic = st.secrets.get("NTFY_TOPIC", "").strip()
         if not topic:
             return False
-
         request = urllib.request.Request(
             f"https://ntfy.sh/{topic}",
             data=message.encode("utf-8"),
             headers={"Title": title},
             method="POST"
         )
-
         with urllib.request.urlopen(request, timeout=10) as response:
             return response.status in (200, 201)
-
     except Exception as error:
         st.error(f"Notification error: {error}")
         return False
@@ -91,9 +78,7 @@ if st.sidebar.button("Test Android Notification"):
     ):
         st.sidebar.success("Test notification sent.")
     else:
-        st.sidebar.warning(
-            "Notification unavailable. Check NTFY_TOPIC in Secrets."
-        )
+        st.sidebar.warning("Notification unavailable. Check NTFY_TOPIC in Secrets.")
 
 
 # =========================================================
@@ -110,31 +95,23 @@ def fetch_market_data(symbol, interval, period):
             actions=False,
             prepost=False
         )
-
         if df is None or df.empty:
             return pd.DataFrame()
-
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
 
         required = ["Open", "High", "Low", "Close"]
         if not all(column in df.columns for column in required):
             return pd.DataFrame()
-
         if "Volume" not in df.columns:
             df["Volume"] = 0
 
         df = df[["Open", "High", "Low", "Close", "Volume"]].copy()
-
         for column in df.columns:
             df[column] = pd.to_numeric(df[column], errors="coerce")
-
         df = df.dropna(subset=["Open", "High", "Low", "Close"])
         df = df.sort_index()
-        df = df[~df.index.duplicated(keep="last")]
-
-        return df
-
+        return df[~df.index.duplicated(keep="last")]
     except Exception:
         return pd.DataFrame()
 
@@ -148,29 +125,15 @@ def remove_latest_candle(df):
 def build_four_hour_data(hourly):
     if hourly is None or hourly.empty:
         return pd.DataFrame()
-
     try:
-        result = hourly.resample(
-            "4h",
-            label="right",
-            closed="right"
-        ).agg({
-            "Open": "first",
-            "High": "max",
-            "Low": "min",
-            "Close": "last",
-            "Volume": "sum"
+        result = hourly.resample("4h", label="right", closed="right").agg({
+            "Open": "first", "High": "max", "Low": "min",
+            "Close": "last", "Volume": "sum"
         })
-
-        result = result.dropna(
-            subset=["Open", "High", "Low", "Close"]
-        )
-
+        result = result.dropna(subset=["Open", "High", "Low", "Close"])
         if len(result) > 1:
             result = result.iloc[:-1]
-
         return result
-
     except Exception:
         return pd.DataFrame()
 
@@ -178,24 +141,15 @@ def build_four_hour_data(hourly):
 @st.cache_data(ttl=300, show_spinner=False)
 def load_all_timeframes(symbol):
     daily = fetch_market_data(symbol, "1d", "2y")
-
     if not daily.empty:
         today_utc = pd.Timestamp.now(tz="UTC").date()
         if daily.index[-1].date() >= today_utc:
             daily = daily.iloc[:-1].copy()
 
-    hourly = remove_latest_candle(
-        fetch_market_data(symbol, "1h", "730d")
-    )
-    fifteen = remove_latest_candle(
-        fetch_market_data(symbol, "15m", "60d")
-    )
-    five = remove_latest_candle(
-        fetch_market_data(symbol, "5m", "60d")
-    )
-    one = remove_latest_candle(
-        fetch_market_data(symbol, "1m", "7d")
-    )
+    hourly = remove_latest_candle(fetch_market_data(symbol, "1h", "730d"))
+    fifteen = remove_latest_candle(fetch_market_data(symbol, "15m", "60d"))
+    five = remove_latest_candle(fetch_market_data(symbol, "5m", "60d"))
+    one = remove_latest_candle(fetch_market_data(symbol, "1m", "7d"))
 
     return {
         "1D": daily,
@@ -214,37 +168,25 @@ def load_all_timeframes(symbol):
 @st.cache_data(ttl=1800, show_spinner=False)
 def run_all_analyses(frames):
     results = {}
-
     for timeframe in TIMEFRAMES:
         data = frames.get(timeframe, pd.DataFrame())
-
         if data is None or data.empty:
             results[timeframe] = {
                 "status": "UNAVAILABLE",
                 "error": "Market data is unavailable."
             }
             continue
-
         try:
             result = analyze_market(data.tail(1200).copy())
-
             if not isinstance(result, dict):
-                raise ValueError(
-                    "Analysis engine returned an invalid result."
-                )
-
+                raise ValueError("Analysis engine returned an invalid result.")
             results[timeframe] = {
-                "status": "ANALYSED",
-                "data": result,
-                "error": None
+                "status": "ANALYSED", "data": result, "error": None
             }
-
         except Exception as error:
             results[timeframe] = {
-                "status": "ERROR",
-                "error": str(error)
+                "status": "ERROR", "error": str(error)
             }
-
     return results
 
 
@@ -252,15 +194,9 @@ def run_all_analyses(frames):
 def run_sr_analysis(data):
     if data is None or data.empty:
         return pd.DataFrame()
-
     try:
         zones = analyze_sr(data.tail(400).copy())
-
-        if isinstance(zones, pd.DataFrame):
-            return zones.head(8).copy()
-
-        return pd.DataFrame()
-
+        return zones.head(8).copy() if isinstance(zones, pd.DataFrame) else pd.DataFrame()
     except Exception:
         return pd.DataFrame()
 
@@ -271,12 +207,10 @@ def run_sr_analysis(data):
 
 def align_timestamp(value, reference):
     timestamp = pd.Timestamp(value)
-
     if reference.tzinfo is None and timestamp.tzinfo is not None:
         timestamp = timestamp.tz_localize(None)
     elif reference.tzinfo is not None and timestamp.tzinfo is None:
         timestamp = timestamp.tz_localize(reference.tzinfo)
-
     return timestamp
 
 
@@ -287,7 +221,6 @@ def align_timestamp(value, reference):
 def draw_sr_zones(fig, zones, data, start_time, end_time):
     if not isinstance(zones, pd.DataFrame) or zones.empty:
         return
-
     required = ["Side", "Zone Low", "Zone High"]
     if not all(column in zones.columns for column in required):
         return
@@ -295,258 +228,169 @@ def draw_sr_zones(fig, zones, data, start_time, end_time):
     for _, zone in zones.head(8).iterrows():
         try:
             side = str(zone["Side"]).upper()
-            low = float(zone["Zone Low"])
-            high = float(zone["Zone High"])
-
+            low, high = float(zone["Zone Low"]), float(zone["Zone High"])
             if pd.isna(low) or pd.isna(high) or low >= high:
                 continue
 
             zone_time = zone.get(
-                "Confirmed Time",
-                zone.get("Pivot Time", data.index[0])
+                "Confirmed Time", zone.get("Pivot Time", data.index[0])
             )
-
             if pd.isna(zone_time):
                 zone_time = data.index[0]
-
             zone_time = align_timestamp(zone_time, start_time)
             after_confirmation = data[data.index >= zone_time]
 
             if side == "SUPPORT":
-                broken = after_confirmation[
-                    after_confirmation["Close"] < low
-                ]
-                fill = "rgba(0,192,135,0.15)"
-                line = "#00C087"
-
+                broken = after_confirmation[after_confirmation["Close"] < low]
+                fill, line = "rgba(0,192,135,0.15)", "#00C087"
             elif side == "RESISTANCE":
-                broken = after_confirmation[
-                    after_confirmation["Close"] > high
-                ]
-                fill = "rgba(240,68,82,0.15)"
-                line = "#F04452"
-
+                broken = after_confirmation[after_confirmation["Close"] > high]
+                fill, line = "rgba(240,68,82,0.15)", "#F04452"
             else:
                 continue
 
             invalidated = not broken.empty
-
             if invalidated:
-                break_time = align_timestamp(
-                    broken.index[0], start_time
-                )
-
+                break_time = align_timestamp(broken.index[0], start_time)
                 if break_time < start_time:
                     continue
-
                 zone_end = min(break_time, end_time)
             else:
                 zone_end = end_time
 
             zone_start = max(zone_time, start_time)
-
             if zone_start > zone_end:
                 continue
-
             midpoint = (low + high) / 2
 
             fig.add_shape(
-                type="rect",
-                x0=zone_start,
-                x1=zone_end,
-                y0=low,
-                y1=high,
-                fillcolor=fill,
-                line=dict(color=line, width=1),
-                layer="below"
+                type="rect", x0=zone_start, x1=zone_end,
+                y0=low, y1=high, fillcolor=fill,
+                line=dict(color=line, width=1), layer="below"
             )
-
             fig.add_shape(
-                type="line",
-                x0=zone_start,
-                x1=zone_end,
-                y0=midpoint,
-                y1=midpoint,
+                type="line", x0=zone_start, x1=zone_end,
+                y0=midpoint, y1=midpoint,
                 line=dict(color=line, width=1, dash="dash"),
                 layer="below"
             )
-
-            label = (
-                f"{side} INVALIDATED"
-                if invalidated
-                else side
-            )
-
             fig.add_annotation(
-                x=zone_end,
-                y=midpoint,
-                text=label,
-                showarrow=False,
-                xanchor="right",
-                yanchor="bottom",
+                x=zone_end, y=midpoint,
+                text=f"{side} INVALIDATED" if invalidated else side,
+                showarrow=False, xanchor="right", yanchor="bottom",
                 font=dict(size=9, color=line),
                 bgcolor="rgba(20,20,20,0.85)"
             )
-
         except Exception:
             continue
 
 
 # =========================================================
 # UNIFIED OB + FVG OVERLAP OVERLAY
-# Only the actual shared price area is drawn.
 # =========================================================
 
 def draw_ob_fvg_overlaps(fig, setups, data, start_time, end_time):
     required = [
-        "ob_time",
-        "ob_low",
-        "ob_high",
-        "fvg_time",
-        "fvg_low",
-        "fvg_high",
-        "direction"
+        "ob_time", "ob_low", "ob_high", "fvg_time",
+        "fvg_low", "fvg_high", "direction"
     ]
-
     if not isinstance(setups, pd.DataFrame) or setups.empty:
         return 0
-
     if not all(column in setups.columns for column in required):
         return 0
 
     drawn = 0
-
     for _, setup in setups.tail(100).iterrows():
         try:
-            ob_time = setup["ob_time"]
-            fvg_time = setup["fvg_time"]
-
+            ob_time, fvg_time = setup["ob_time"], setup["fvg_time"]
             if pd.isna(ob_time) or pd.isna(fvg_time):
                 continue
-
             ob_time = align_timestamp(ob_time, start_time)
             fvg_time = align_timestamp(fvg_time, start_time)
             overlap_time = max(ob_time, fvg_time)
-
             if overlap_time > end_time:
                 continue
 
-            ob_low = float(setup["ob_low"])
-            ob_high = float(setup["ob_high"])
-            fvg_low = float(setup["fvg_low"])
-            fvg_high = float(setup["fvg_high"])
-
+            ob_low, ob_high = float(setup["ob_low"]), float(setup["ob_high"])
+            fvg_low, fvg_high = float(setup["fvg_low"]), float(setup["fvg_high"])
             values = [ob_low, ob_high, fvg_low, fvg_high]
             if not all(pd.notna(value) for value in values):
                 continue
 
-            # Calculate the true shared price intersection.
             overlap_low = max(ob_low, fvg_low)
             overlap_high = min(ob_high, fvg_high)
-
             if overlap_low >= overlap_high:
                 continue
 
             direction = str(setup["direction"]).upper()
-
             if direction == "BULLISH":
-                color = "#00C087"
-                fill = "rgba(0,192,135,0.23)"
-
-                # Match strategy_engine.py invalidation boundary.
+                color, fill = "#00C087", "rgba(0,192,135,0.23)"
                 invalid_condition = (
                     (data.index >= overlap_time)
                     & (data["Close"] < max(ob_low, fvg_low))
                 )
-
             elif direction == "BEARISH":
-                color = "#F04452"
-                fill = "rgba(240,68,82,0.23)"
-
-                # Match strategy_engine.py invalidation boundary.
+                color, fill = "#F04452", "rgba(240,68,82,0.23)"
                 invalid_condition = (
                     (data.index >= overlap_time)
                     & (data["Close"] > min(ob_high, fvg_high))
                 )
-
             else:
                 continue
 
             invalid_rows = data.loc[invalid_condition]
             setup_end = end_time
-            status = str(
-                setup.get("status", "ACTIVE")
-            ).upper()
-
+            status = str(setup.get("status", "ACTIVE")).upper()
             if not invalid_rows.empty:
-                invalid_time = align_timestamp(
-                    invalid_rows.index[0], start_time
-                )
-
+                invalid_time = align_timestamp(invalid_rows.index[0], start_time)
                 if invalid_time < start_time:
                     continue
-
                 setup_end = min(invalid_time, end_time)
                 status = "INVALIDATED"
-
             elif status == "INVALIDATED":
                 continue
 
-            if overlap_time < start_time:
-                visible_start = start_time
-            else:
-                visible_start = overlap_time
-
+            visible_start = max(overlap_time, start_time)
             if visible_start > setup_end:
                 continue
 
             fig.add_shape(
-                type="rect",
-                x0=visible_start,
-                x1=setup_end,
-                y0=overlap_low,
-                y1=overlap_high,
-                fillcolor=fill,
-                line=dict(color=color, width=1.5),
-                layer="below"
+                type="rect", x0=visible_start, x1=setup_end,
+                y0=overlap_low, y1=overlap_high, fillcolor=fill,
+                line=dict(color=color, width=1.5), layer="below"
             )
-
             label = f"{direction} OB + FVG"
             if status == "INVALIDATED":
                 label += " (INVALIDATED)"
-
             fig.add_annotation(
-                x=visible_start,
-                y=(overlap_low + overlap_high) / 2,
-                text=label,
-                showarrow=False,
-                xanchor="left",
+                x=visible_start, y=(overlap_low + overlap_high) / 2,
+                text=label, showarrow=False, xanchor="left",
                 font=dict(size=9, color=color),
                 bgcolor="rgba(20,20,20,0.85)"
             )
-
             drawn += 1
-
         except Exception:
             continue
-
     return drawn
 
 
 # =========================================================
-# PRICE CHART
+# PRICE CHART — FULL HISTORY, PAN / ZOOM, OHLCV HOVER
 # =========================================================
 
 def display_chart(data, result, sr_zones, symbol, timeframe):
-    # Fewer visible candles create more room for each candle body and wick.
-    chart_data = data.tail(90).copy()
-
+    # Keep all available completed candles in the chart data.
+    chart_data = data.copy()
     if chart_data.empty:
         st.warning("No candles are available.")
         return
 
-    start_time = chart_data.index[0]
-    end_time = chart_data.index[-1]
+    start_time, end_time = chart_data.index[0], chart_data.index[-1]
+    latest_close = float(chart_data["Close"].iloc[-1])
+    initial_start = chart_data.index[max(0, len(chart_data) - 90)]
+
+    # Volume is included in hover data, including zero-volume instruments.
+    customdata = chart_data[["Volume"]].fillna(0).to_numpy()
     fig = go.Figure()
 
     fig.add_trace(go.Candlestick(
@@ -555,17 +399,25 @@ def display_chart(data, result, sr_zones, symbol, timeframe):
         high=chart_data["High"],
         low=chart_data["Low"],
         close=chart_data["Close"],
+        customdata=customdata,
         name="Price",
-        increasing_line_color="#26A69A",
-        decreasing_line_color="#EF5350",
-        increasing_fillcolor="#26A69A",
-        decreasing_fillcolor="#EF5350",
-        whiskerwidth=1.0
+        increasing_line_color="#20C997",
+        decreasing_line_color="#F05B65",
+        increasing_fillcolor="#20C997",
+        decreasing_fillcolor="#F05B65",
+        whiskerwidth=1.0,
+        hovertemplate=(
+            "<b>%{x|%d %b %Y · %H:%M}</b><br>"
+            "Open: %{open:,.5f}<br>"
+            "High: %{high:,.5f}<br>"
+            "Low: %{low:,.5f}<br>"
+            "Close: %{close:,.5f}<br>"
+            "Volume: %{customdata[0]:,.0f}"
+            "<extra></extra>"
+        )
     ))
 
-    draw_sr_zones(
-        fig, sr_zones, data, start_time, end_time
-    )
+    draw_sr_zones(fig, sr_zones, data, start_time, end_time)
 
     setups = result.get("setups", pd.DataFrame())
     overlap_count = draw_ob_fvg_overlaps(
@@ -573,100 +425,77 @@ def display_chart(data, result, sr_zones, symbol, timeframe):
     )
 
     liquidity = result.get("liquidity", pd.DataFrame())
-
     if (
         isinstance(liquidity, pd.DataFrame)
         and not liquidity.empty
         and {"swept", "price", "side"}.issubset(liquidity.columns)
     ):
-        active = liquidity[
-            liquidity["swept"] == False
-        ].tail(6)
-
+        active = liquidity[liquidity["swept"] == False].tail(6)
         for _, level in active.iterrows():
             try:
                 price = float(level["price"])
-                color = (
-                    "#EF5350"
-                    if level["side"] == "BSL"
-                    else "#26A69A"
-                )
-
+                color = "#F05B65" if level["side"] == "BSL" else "#20C997"
                 fig.add_hline(
-                    y=price,
-                    line_dash="dot",
-                    line_color=color,
-                    line_width=1.3,
-                    opacity=0.9
+                    y=price, line_dash="dot", line_color=color,
+                    line_width=1.3, opacity=0.9
                 )
             except Exception:
                 continue
 
+    # The yellow line is the latest completed candle close, not a live tick.
+    fig.add_hline(
+        y=latest_close,
+        line_color="#FFD54F",
+        line_width=1.8,
+        line_dash="solid",
+        annotation_text=f"Latest close {latest_close:,.5f}",
+        annotation_position="top right",
+        annotation_font=dict(color="#FFD54F", size=11),
+        annotation_bgcolor="rgba(20,20,20,0.85)"
+    )
+
+    xaxis_range = [initial_start, end_time]
+    reset_counter = st.session_state.get("destiny_chart_reset_counter", 0)
+
     fig.update_layout(
         title=dict(
             text=f"{symbol}  |  {timeframe}",
-            x=0.02,
-            xanchor="left",
+            x=0.02, xanchor="left",
             font=dict(size=19, color="#E6EAF0")
         ),
         template="plotly_dark",
         paper_bgcolor="#0B0E11",
         plot_bgcolor="#0B0E11",
-        height=560,
+        height=590,
         autosize=True,
-        margin=dict(l=12, r=22, t=58, b=42),
-        font=dict(
-            family="Arial, sans-serif",
-            size=14,
-            color="#D7DCE2"
-        ),
+        margin=dict(l=12, r=95, t=62, b=42),
+        font=dict(family="Arial, sans-serif", size=14, color="#D7DCE2"),
         hoverlabel=dict(
-            bgcolor="#20262D",
-            bordercolor="#59636E",
+            bgcolor="#20262D", bordercolor="#59636E",
             font=dict(size=13, color="#FFFFFF")
         ),
         hovermode="x",
+        # Changing this key on the reset button forces Plotly back to the latest view.
+        uirevision=f"destiny-{symbol}-{timeframe}-{reset_counter}",
         xaxis=dict(
-            title=None,
-            type="date",
-            range=[start_time, end_time],
-            rangeslider=dict(visible=False),
-            tickformat="%d %b",
-            nticks=5,
-            tickfont=dict(size=13, color="#C5CBD3"),
-            showgrid=True,
-            gridcolor="rgba(180,190,200,0.10)",
-            zeroline=False,
-            showline=True,
-            linecolor="#3A424B",
-            linewidth=1,
-            ticks="outside",
-            tickcolor="#68727D",
-            automargin=True,
-            showspikes=True,
-            spikemode="across",
-            spikesnap="cursor",
-            spikethickness=1,
+            title=None, type="date", range=xaxis_range,
+            rangeslider=dict(visible=False), tickformat="%d %b",
+            nticks=6, tickfont=dict(size=13, color="#C5CBD3"),
+            showgrid=True, gridcolor="rgba(180,190,200,0.10)",
+            zeroline=False, showline=True, linecolor="#3A424B",
+            linewidth=1, ticks="outside", tickcolor="#68727D",
+            automargin=True, showspikes=True, spikemode="across",
+            spikesnap="cursor", spikethickness=1,
             spikecolor="rgba(210,220,230,0.45)"
         ),
         yaxis=dict(
-            title=None,
-            side="right",
-            autorange=True,
+            title=None, side="right", autorange=True,
             tickfont=dict(size=13, color="#C5CBD3"),
-            showgrid=True,
-            gridcolor="rgba(180,190,200,0.10)",
-            zeroline=False,
-            showline=True,
-            linecolor="#3A424B",
-            linewidth=1,
-            ticks="outside",
-            tickcolor="#68727D",
-            automargin=True,
-            showspikes=True,
-            spikemode="across",
-            spikesnap="cursor",
-            spikethickness=1,
+            showgrid=True, gridcolor="rgba(180,190,200,0.10)",
+            zeroline=False, showline=True, linecolor="#3A424B",
+            linewidth=1, ticks="outside", tickcolor="#68727D",
+            automargin=True, showspikes=True, spikemode="across",
+            spikesnap="cursor", spikethickness=1,
             spikecolor="rgba(210,220,230,0.45)"
         ),
         showlegend=False,
@@ -681,21 +510,17 @@ def display_chart(data, result, sr_zones, symbol, timeframe):
             "scrollZoom": True,
             "displaylogo": False,
             "responsive": True,
-            "modeBarButtonsToRemove": [
-                "select2d",
-                "lasso2d"
-            ]
-        }
+            "modeBarButtonsToRemove": ["select2d", "lasso2d"]
+        },
+        key=f"destiny-chart-{symbol}-{timeframe}"
     )
 
     st.caption(
-        "Green S/R = support | Red S/R = resistance | "
-        "Dashed S/R centre = 50% midpoint | "
-        "Green = bullish OB/FVG shared area | "
-        "Red = bearish OB/FVG shared area | "
+        "Yellow = latest completed candle close | Green S/R = support | "
+        "Red S/R = resistance | Dashed S/R centre = 50% midpoint | "
+        "Green = bullish OB/FVG shared area | Red = bearish OB/FVG shared area | "
         "Dotted red = BSL | Dotted green = SSL"
     )
-
     if overlap_count == 0:
         st.info(
             "No qualified OB + FVG overlap is visible in this chart window. "
@@ -709,58 +534,43 @@ def display_chart(data, result, sr_zones, symbol, timeframe):
 
 def get_statistics(results):
     rows = []
-
     for timeframe in TIMEFRAMES:
         item = results.get(timeframe, {})
-
         if item.get("status") != "ANALYSED":
             rows.append({
                 "Timeframe": timeframe,
                 "Status": item.get("status", "UNKNOWN"),
-                "Candles": 0,
-                "Bullish BOS": 0,
-                "Bearish BOS": 0,
-                "Qualified Setups": 0,
-                "Active Setups": 0
+                "Candles": 0, "Bullish BOS": 0, "Bearish BOS": 0,
+                "Qualified Setups": 0, "Active Setups": 0
             })
             continue
-
         result = item["data"]
         stats = result.get("statistics", {})
-
         rows.append({
-            "Timeframe": timeframe,
-            "Status": "ANALYSED",
+            "Timeframe": timeframe, "Status": "ANALYSED",
             "Candles": len(result.get("candles", [])),
             "Bullish BOS": stats.get("bullish_bos", 0),
             "Bearish BOS": stats.get("bearish_bos", 0),
-            "Qualified Setups": stats.get(
-                "total_qualified_setups", 0
-            ),
+            "Qualified Setups": stats.get("total_qualified_setups", 0),
             "Active Setups": stats.get("active_setups", 0)
         })
-
     return pd.DataFrame(rows)
 
 
 @st.cache_data(ttl=300, show_spinner=False)
 def scan_market_category(category):
     rows = []
-
     for instrument, ticker in MARKETS.get(category, {}).items():
         try:
             history = remove_latest_candle(
                 fetch_market_data(ticker, "1h", "60d")
             )
-
             if history.empty or len(history) < 40:
                 rows.append({
-                    "Instrument": instrument,
-                    "Symbol": ticker,
+                    "Instrument": instrument, "Symbol": ticker,
                     "Data status": "Unavailable / insufficient",
                     "Candles analysed": len(history),
-                    "Bullish BOS history": "—",
-                    "Bearish BOS history": "—",
+                    "Bullish BOS history": "—", "Bearish BOS history": "—",
                     "Historical OB + FVG setups": "—",
                     "Active historical setups": "—"
                 })
@@ -768,40 +578,25 @@ def scan_market_category(category):
 
             analysis = analyze_market(history.tail(1200).copy())
             stats = analysis.get("statistics", {})
-
             rows.append({
-                "Instrument": instrument,
-                "Symbol": ticker,
+                "Instrument": instrument, "Symbol": ticker,
                 "Data status": "Analysed",
-                "Candles analysed": len(
-                    analysis.get("candles", [])
-                ),
-                "Bullish BOS history": int(
-                    stats.get("bullish_bos", 0) or 0
-                ),
-                "Bearish BOS history": int(
-                    stats.get("bearish_bos", 0) or 0
-                ),
+                "Candles analysed": len(analysis.get("candles", [])),
+                "Bullish BOS history": int(stats.get("bullish_bos", 0) or 0),
+                "Bearish BOS history": int(stats.get("bearish_bos", 0) or 0),
                 "Historical OB + FVG setups": int(
                     stats.get("total_qualified_setups", 0) or 0
                 ),
-                "Active historical setups": int(
-                    stats.get("active_setups", 0) or 0
-                )
+                "Active historical setups": int(stats.get("active_setups", 0) or 0)
             })
-
         except Exception:
             rows.append({
-                "Instrument": instrument,
-                "Symbol": ticker,
+                "Instrument": instrument, "Symbol": ticker,
                 "Data status": "Analysis unavailable",
-                "Candles analysed": 0,
-                "Bullish BOS history": "—",
-                "Bearish BOS history": "—",
-                "Historical OB + FVG setups": "—",
+                "Candles analysed": 0, "Bullish BOS history": "—",
+                "Bearish BOS history": "—", "Historical OB + FVG setups": "—",
                 "Active historical setups": "—"
             })
-
     return pd.DataFrame(rows)
 
 
@@ -835,26 +630,18 @@ if workspace == "Historical Market Scanner":
         "Compares completed 1-hour historical candles. "
         "Results describe past data and are not forecasts."
     )
-
     scanner_category = st.selectbox(
-        "Market category",
-        list(MARKETS.keys()),
+        "Market category", list(MARKETS.keys()),
         key="scanner_market_category"
     )
-
     col_a, col_b = st.columns(2)
-
     with col_a:
         run_scan = st.button(
-            "SCAN SELECTED MARKET",
-            use_container_width=True,
-            type="primary"
+            "SCAN SELECTED MARKET", use_container_width=True, type="primary"
         )
-
     with col_b:
         refresh_scan = st.button(
-            "REFRESH SCANNER DATA",
-            use_container_width=True
+            "REFRESH SCANNER DATA", use_container_width=True
         )
 
     if refresh_scan:
@@ -865,62 +652,33 @@ if workspace == "Historical Market Scanner":
     if (
         run_scan
         or "destiny_scanner_results" not in st.session_state
-        or st.session_state.get(
-            "destiny_scanner_category"
-        ) != scanner_category
+        or st.session_state.get("destiny_scanner_category") != scanner_category
     ):
-        with st.spinner(
-            f"Reviewing historical {scanner_category} data..."
-        ):
-            st.session_state["destiny_scanner_results"] = (
-                scan_market_category(scanner_category)
-            )
-            st.session_state["destiny_scanner_category"] = (
+        with st.spinner(f"Reviewing historical {scanner_category} data..."):
+            st.session_state["destiny_scanner_results"] = scan_market_category(
                 scanner_category
             )
+            st.session_state["destiny_scanner_category"] = scanner_category
 
     scanner_results = st.session_state.get(
-        "destiny_scanner_results",
-        pd.DataFrame()
+        "destiny_scanner_results", pd.DataFrame()
     )
-
-    if (
-        isinstance(scanner_results, pd.DataFrame)
-        and not scanner_results.empty
-    ):
+    if isinstance(scanner_results, pd.DataFrame) and not scanner_results.empty:
         analysed_count = int(
-            (
-                scanner_results["Data status"] == "Analysed"
-            ).sum()
+            (scanner_results["Data status"] == "Analysed").sum()
         )
-
-        st.metric(
-            "Instruments analysed",
-            f"{analysed_count} / {len(scanner_results)}"
-        )
-
+        st.metric("Instruments analysed", f"{analysed_count} / {len(scanner_results)}")
         st.dataframe(
-            scanner_results,
-            use_container_width=True,
-            hide_index=True
+            scanner_results, use_container_width=True, hide_index=True
         )
-
         st.download_button(
             "Download scanner results",
-            data=scanner_results.to_csv(
-                index=False
-            ).encode("utf-8"),
-            file_name=(
-                f"destiny_{scanner_category.lower()}_historical_scan.csv"
-            ),
-            mime="text/csv",
-            use_container_width=True
+            data=scanner_results.to_csv(index=False).encode("utf-8"),
+            file_name=f"destiny_{scanner_category.lower()}_historical_scan.csv",
+            mime="text/csv", use_container_width=True
         )
-
     else:
-        st.info(
-            "Choose a category and tap SCAN SELECTED MARKET."
-        )
+        st.info("Choose a category and tap SCAN SELECTED MARKET.")
 
     st.caption(
         "Coverage: 1-hour candles, up to 60 days where available. "
@@ -934,38 +692,25 @@ if workspace == "Historical Market Scanner":
 # =========================================================
 
 col1, col2 = st.columns(2)
-
 with col1:
-    market_type = st.selectbox(
-        "Select market",
-        list(MARKETS.keys())
-    )
-
+    market_type = st.selectbox("Select market", list(MARKETS.keys()))
 with col2:
     asset_name = st.selectbox(
-        "Select instrument",
-        list(MARKETS[market_type].keys())
+        "Select instrument", list(MARKETS[market_type].keys())
     )
 
 symbol = MARKETS[market_type][asset_name]
-
 chart_timeframe = st.selectbox(
-    "Main chart timeframe",
-    TIMEFRAMES,
-    index=2
+    "Main chart timeframe", TIMEFRAMES, index=2
 )
 
-if st.button(
-    "REFRESH MARKET DATA",
-    use_container_width=True
-):
+if st.button("REFRESH MARKET DATA", use_container_width=True):
     st.cache_data.clear()
     st.rerun()
 
 try:
     with st.spinner("Loading market data..."):
         frames = load_all_timeframes(symbol)
-
 except Exception as error:
     st.error("The market data could not be loaded.")
     st.code(str(error))
@@ -974,20 +719,13 @@ except Exception as error:
 try:
     with st.spinner("Analysing available timeframes..."):
         analyses = run_all_analyses(frames)
-
 except Exception as error:
     st.error("The analysis process encountered an error.")
     st.code(str(error))
     st.stop()
 
-selected_data = frames.get(
-    chart_timeframe,
-    pd.DataFrame()
-)
-
-with st.spinner(
-    f"Analysing historical S/R on {chart_timeframe}..."
-):
+selected_data = frames.get(chart_timeframe, pd.DataFrame())
+with st.spinner(f"Analysing historical S/R on {chart_timeframe}..."):
     sr_selected = run_sr_analysis(selected_data)
 
 
@@ -998,71 +736,85 @@ with st.spinner(
 st.divider()
 st.subheader("Market data availability")
 status_columns = st.columns(3)
-
 for index, timeframe in enumerate(TIMEFRAMES):
     frame = frames.get(timeframe, pd.DataFrame())
-
     with status_columns[index % 3]:
         if not frame.empty:
-            st.success(
-                f"{timeframe}: {len(frame)} candles"
-            )
+            st.success(f"{timeframe}: {len(frame)} candles")
         else:
-            st.warning(
-                f"{timeframe}: Unavailable"
-            )
+            st.warning(f"{timeframe}: Unavailable")
 
 
 # =========================================================
-# MAIN PRICE CHART
+# MAIN PRICE CHART — REFRESHES EVERY 5 MINUTES WHEN SUPPORTED
 # =========================================================
 
 st.divider()
 st.subheader("Price chart")
-
-selected_analysis = analyses.get(
-    chart_timeframe,
-    {}
+st.caption(
+    "The chart opens on the latest 90 candles. Drag horizontally to inspect "
+    "older history, pinch or scroll to zoom, and select a candle for OHLCV."
 )
 
-if (
-    not selected_data.empty
-    and selected_analysis.get("status") == "ANALYSED"
-):
-    result = selected_analysis["data"]
-
-    display_chart(
-        selected_data,
-        result,
-        sr_selected,
-        symbol,
-        chart_timeframe
+if st.button("RETURN TO LATEST", use_container_width=True):
+    st.session_state["destiny_chart_reset_counter"] = (
+        st.session_state.get("destiny_chart_reset_counter", 0) + 1
     )
+    st.rerun()
 
-    st.metric(
-        "Latest completed candle close",
-        f"{selected_data['Close'].iloc[-1]:,.5f}"
-    )
 
-    st.download_button(
-        "Download historical OHLCV data",
-        data=selected_data.to_csv().encode("utf-8"),
-        file_name=f"{symbol}_{chart_timeframe}.csv",
-        mime="text/csv"
-    )
+def _render_refreshing_chart(symbol_value, timeframe_value):
+    try:
+        fresh_frames = load_all_timeframes(symbol_value)
+        fresh_data = fresh_frames.get(timeframe_value, pd.DataFrame())
+        if fresh_data.empty:
+            st.warning(f"No genuine {timeframe_value} data is currently available.")
+            return
 
-elif selected_data.empty:
-    st.warning(
-        f"No genuine {chart_timeframe} data is currently available."
-    )
+        fresh_analyses = run_all_analyses(fresh_frames)
+        fresh_item = fresh_analyses.get(timeframe_value, {})
+        if fresh_item.get("status") != "ANALYSED":
+            st.error(fresh_item.get("error", "Analysis could not be completed."))
+            return
 
-else:
-    st.error(
-        selected_analysis.get(
-            "error",
-            "Analysis could not be completed."
+        fresh_sr = run_sr_analysis(fresh_data)
+        display_chart(
+            fresh_data, fresh_item["data"], fresh_sr,
+            symbol_value, timeframe_value
         )
+        st.metric(
+            "Latest completed candle close",
+            f"{float(fresh_data['Close'].iloc[-1]):,.5f}"
+        )
+        st.download_button(
+            "Download historical OHLCV data",
+            data=fresh_data.to_csv().encode("utf-8"),
+            file_name=f"{symbol_value}_{timeframe_value}.csv",
+            mime="text/csv"
+        )
+        st.caption(
+            "Data refreshes from the historical data source at five-minute "
+            "intervals where the deployed Streamlit version supports fragments. "
+            "The yellow line marks the latest completed candle close, not a live tick."
+        )
+    except Exception as error:
+        st.error("The chart could not be refreshed.")
+        st.caption(str(error))
+
+
+# Streamlit fragments are available in recent Streamlit versions.
+# The fallback keeps the app usable on older installations without auto-refresh.
+if hasattr(st, "fragment"):
+    @st.fragment(run_every="5m")
+    def refreshing_chart(symbol_value, timeframe_value):
+        _render_refreshing_chart(symbol_value, timeframe_value)
+    refreshing_chart(symbol, chart_timeframe)
+else:
+    st.warning(
+        "Automatic chart refresh requires a recent Streamlit version. "
+        "The chart still works; use REFRESH MARKET DATA to reload it."
     )
+    _render_refreshing_chart(symbol, chart_timeframe)
 
 
 # =========================================================
@@ -1071,62 +823,33 @@ else:
 
 st.divider()
 st.subheader("Destiny AI — MTF Structure Context")
-
 try:
     mtf_context = build_mtf_context(analyses)
-
-    st.caption(
-        mtf_context.get(
-            "data_coverage",
-            "MTF coverage unavailable"
-        )
-    )
-
+    st.caption(mtf_context.get("data_coverage", "MTF coverage unavailable"))
     st.markdown("### Higher Timeframe Context")
-    st.info(
-        mtf_context.get(
-            "higher_timeframe_summary",
-            "Higher timeframe analysis unavailable."
-        )
-    )
-
+    st.info(mtf_context.get(
+        "higher_timeframe_summary", "Higher timeframe analysis unavailable."
+    ))
     st.markdown("### Lower Timeframe Context")
-    st.info(
-        mtf_context.get(
-            "lower_timeframe_summary",
-            "Lower timeframe analysis unavailable."
-        )
-    )
+    st.info(mtf_context.get(
+        "lower_timeframe_summary", "Lower timeframe analysis unavailable."
+    ))
 
     mtf_rows = []
-
     for timeframe in TIMEFRAMES:
-        item = mtf_context.get(
-            "timeframes", {}
-        ).get(timeframe, {})
-
+        item = mtf_context.get("timeframes", {}).get(timeframe, {})
         mtf_rows.append({
             "Timeframe": timeframe,
             "Status": item.get("status", "Unavailable"),
             "Bullish BOS": item.get("bullish_bos", 0),
             "Bearish BOS": item.get("bearish_bos", 0),
-            "Structure": item.get(
-                "structure",
-                "Insufficient data"
-            )
+            "Structure": item.get("structure", "Insufficient data")
         })
-
-    st.dataframe(
-        pd.DataFrame(mtf_rows),
-        use_container_width=True,
-        hide_index=True
-    )
-
+    st.dataframe(pd.DataFrame(mtf_rows), use_container_width=True, hide_index=True)
     st.caption(
         "MTF context summarizes historical BOS counts. "
         "It does not predict price direction."
     )
-
 except Exception as error:
     st.error("MTF context could not be generated.")
     st.caption(str(error))
@@ -1138,27 +861,14 @@ except Exception as error:
 
 st.divider()
 st.subheader("Historical Support & Resistance Zones")
-
-if (
-    isinstance(sr_selected, pd.DataFrame)
-    and not sr_selected.empty
-):
+if isinstance(sr_selected, pd.DataFrame) and not sr_selected.empty:
     st.caption(
-        f"Up to 8 S/R zones from the latest 400 "
-        f"{chart_timeframe} candles. "
+        f"Up to 8 S/R zones from the latest 400 {chart_timeframe} candles. "
         "BROKEN means a candle close crossed the outer zone boundary."
     )
-
-    st.dataframe(
-        sr_selected.head(8),
-        use_container_width=True,
-        hide_index=True
-    )
-
+    st.dataframe(sr_selected.head(8), use_container_width=True, hide_index=True)
 else:
-    st.info(
-        "No historical S/R zones are available for this timeframe."
-    )
+    st.info("No historical S/R zones are available for this timeframe.")
 
 
 # =========================================================
@@ -1166,14 +876,8 @@ else:
 # =========================================================
 
 st.subheader("Multi-timeframe statistics")
-
 summary = get_statistics(analyses)
-
-st.dataframe(
-    summary,
-    use_container_width=True,
-    hide_index=True
-)
+st.dataframe(summary, use_container_width=True, hide_index=True)
 
 
 # =========================================================
@@ -1181,98 +885,45 @@ st.dataframe(
 # =========================================================
 
 st.subheader("Detailed timeframe results")
-
 for timeframe in TIMEFRAMES:
     item = analyses.get(timeframe, {})
-
     with st.expander(
-        f"{timeframe} analysis",
-        expanded=(timeframe == "1H")
+        f"{timeframe} analysis", expanded=(timeframe == "1H")
     ):
         if item.get("status") == "UNAVAILABLE":
             st.warning(item.get("error"))
             continue
-
         if item.get("status") == "ERROR":
             st.error(item.get("error"))
             continue
 
         result = item["data"]
         stats = result.get("statistics", {})
-
         a, b, c = st.columns(3)
+        a.metric("Bullish BOS", stats.get("bullish_bos", 0))
+        b.metric("Bearish BOS", stats.get("bearish_bos", 0))
+        c.metric("Qualified OB + FVG", stats.get("total_qualified_setups", 0))
 
-        a.metric(
-            "Bullish BOS",
-            stats.get("bullish_bos", 0)
-        )
-        b.metric(
-            "Bearish BOS",
-            stats.get("bearish_bos", 0)
-        )
-        c.metric(
-            "Qualified OB + FVG",
-            stats.get("total_qualified_setups", 0)
-        )
+        st.write("**Active setups:**", stats.get("active_setups", 0))
+        st.write("**Invalidated setups:**", stats.get("invalidated_setups", 0))
+        st.write("**Active BSL levels:**", stats.get("active_bsl_levels", 0))
+        st.write("**Active SSL levels:**", stats.get("active_ssl_levels", 0))
 
-        st.write(
-            "**Active setups:**",
-            stats.get("active_setups", 0)
-        )
-        st.write(
-            "**Invalidated setups:**",
-            stats.get("invalidated_setups", 0)
-        )
-        st.write(
-            "**Active BSL levels:**",
-            stats.get("active_bsl_levels", 0)
-        )
-        st.write(
-            "**Active SSL levels:**",
-            stats.get("active_ssl_levels", 0)
-        )
-
-        setups = result.get(
-            "setups",
-            pd.DataFrame()
-        )
-
-        if (
-            isinstance(setups, pd.DataFrame)
-            and not setups.empty
-        ):
-            st.write(
-                "**Qualified OB + FVG overlap history**"
-            )
-
-            st.dataframe(
-                setups.tail(30),
-                use_container_width=True,
-                hide_index=True
-            )
-
+        setups = result.get("setups", pd.DataFrame())
+        if isinstance(setups, pd.DataFrame) and not setups.empty:
+            st.write("**Qualified OB + FVG overlap history**")
+            st.dataframe(setups.tail(30), use_container_width=True, hide_index=True)
         else:
             st.info(
-                "No qualified OB + FVG overlaps were detected "
-                "in this historical window. "
-                "Standalone FVGs are intentionally excluded."
+                "No qualified OB + FVG overlaps were detected in this historical "
+                "window. Standalone FVGs are intentionally excluded."
             )
 
-        liquidity = result.get(
-            "liquidity",
-            pd.DataFrame()
-        )
-
-        if (
-            isinstance(liquidity, pd.DataFrame)
-            and not liquidity.empty
-        ):
+        liquidity = result.get("liquidity", pd.DataFrame())
+        if isinstance(liquidity, pd.DataFrame) and not liquidity.empty:
             st.write("**BSL / SSL liquidity history**")
-
             st.dataframe(
-                liquidity.tail(30),
-                use_container_width=True,
-                hide_index=True
+                liquidity.tail(30), use_container_width=True, hide_index=True
             )
 
 
@@ -1281,49 +932,37 @@ for timeframe in TIMEFRAMES:
 # =========================================================
 
 st.divider()
-
 with st.expander("Data and engine information"):
-    st.write(
-        "Market data source: Yahoo Finance through yfinance."
-    )
-    st.write(
-        "The 4H timeframe is constructed from 1H candles."
-    )
-    st.write(
-        "The latest potentially incomplete intraday candle is excluded."
-    )
-    st.write(
-        "Each timeframe is analysed independently."
-    )
+    st.write("Market data source: Yahoo Finance through yfinance.")
+    st.write("The 4H timeframe is constructed from 1H candles.")
+    st.write("The latest potentially incomplete intraday candle is excluded.")
+    st.write("Each timeframe is analysed independently.")
     st.write(
         "The strategy engine requires a qualified BOS, displacement, "
         "an opposing order-block candle, and an overlapping FVG."
     )
     st.write(
-        "The FVG volume qualification remains enabled in "
-        "strategy_engine.py. Markets with missing or zero volume "
-        "may therefore produce fewer qualified overlaps."
+        "The FVG volume qualification remains enabled in strategy_engine.py. "
+        "Markets with missing or zero volume may therefore produce fewer "
+        "qualified overlaps."
     )
     st.write(
-        "The chart displays only the shared price intersection "
-        "of qualified OB and FVG zones. It does not display "
-        "standalone FVGs."
+        "The chart displays only the shared price intersection of qualified "
+        "OB and FVG zones. It does not display standalone FVGs."
     )
     st.write(
-        "S/R invalidation uses a completed candle close beyond "
-        "the outer boundary of the zone. A wick alone does not "
-        "invalidate it."
+        "S/R invalidation uses a completed candle close beyond the outer "
+        "boundary of the zone. A wick alone does not invalidate it."
     )
-    st.write(
-        "The strategy analysis uses up to 1,200 candles per timeframe."
-    )
+    st.write("The strategy analysis uses up to 1,200 candles per timeframe.")
     st.write(
         "The S/R engine analyses up to 400 candles on the selected timeframe."
     )
+    st.write("No fabricated candles are created when market data is unavailable.")
     st.write(
-        "No fabricated candles are created when market data is unavailable."
+        "The chart can display all returned historical candles, while initially "
+        "showing the most recent 90. Automatic refresh is every five minutes "
+        "when Streamlit fragments are supported."
     )
 
-st.caption(
-    "DESTINY AI | Historical analysis and virtual paper-testing"
-)
+st.caption("DESTINY AI | Historical analysis and virtual paper-testing")
