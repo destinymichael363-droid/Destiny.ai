@@ -16,6 +16,7 @@ import urllib.request
 # =========================================================
 
 st.set_page_config(
+    require_login()
     page_title="Destiny AI",
     page_icon="📊",
     layout="wide",
