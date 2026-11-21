@@ -405,23 +405,46 @@ def draw_ob_fvg_overlaps(fig, setups, data, start_time, end_time):
 # =========================================================
 
 def display_chart(data, result, sr_zones, symbol, timeframe):
-    # Keep the browser workload controlled. Opens on 90 candles;
-    # the remaining candles in this 1,200-bar window can be panned to.
+    # Keep up to 1,200 completed candles available for historical navigation.
     chart_data = data.tail(1200).copy()
     if chart_data.empty:
         st.warning("No candles are available.")
         return
 
+    # Separate controls make horizontal and vertical framing adjustable
+    # without changing the underlying analysis or historical data.
+    x_control, y_control = st.columns(2)
+    with x_control:
+        visible_count = st.slider(
+            "Candles on screen",
+            min_value=30,
+            max_value=180,
+            value=60,
+            step=10,
+            key=f"destiny_visible_candles_{symbol}_{timeframe}"
+        )
+    with y_control:
+        vertical_scale = st.slider(
+            "Vertical zoom",
+            min_value=0.6,
+            max_value=2.0,
+            value=1.0,
+            step=0.1,
+            key=f"destiny_vertical_zoom_{symbol}_{timeframe}",
+            help="Lower values zoom closer vertically; higher values show more price range."
+        )
+
     start_time = chart_data.index[0]
     end_time = chart_data.index[-1]
     latest_close = float(chart_data["Close"].iloc[-1])
-    visible_data = chart_data.tail(90)
+    visible_data = chart_data.tail(visible_count)
     first_visible = visible_data.index[0]
     visible_low = float(visible_data["Low"].min())
     visible_high = float(visible_data["High"].max())
     visible_span = max(visible_high - visible_low, abs(latest_close) * 0.002)
-    y_padding = visible_span * 0.10
-    initial_y_range = [visible_low - y_padding, visible_high + y_padding]
+    center_price = (visible_high + visible_low) / 2
+    half_range = max(visible_span * 0.55 * vertical_scale, abs(latest_close) * 0.0005)
+    initial_y_range = [center_price - half_range, center_price + half_range]
     volume_data = chart_data["Volume"].fillna(0).to_numpy().reshape(-1, 1)
 
     fig = go.Figure()
@@ -559,8 +582,8 @@ def display_chart(data, result, sr_zones, symbol, timeframe):
     )
 
     st.caption(
-        "Showing the latest 90 candles first; pan left to inspect the wider 1,200-candle history. "
-        "Use Autoscale in the toolbar after moving to a different period. "
+        "Showing the selected candle window; pan left to inspect the wider 1,200-candle history. "
+        "Use the separate controls above to adjust horizontal and vertical framing. "
         "Drag to pan | Pinch or use toolbar to zoom | "
         "Yellow = latest completed close | Green = support / bullish | "
         "Red = resistance / bearish | Dashed = S/R midpoint"
