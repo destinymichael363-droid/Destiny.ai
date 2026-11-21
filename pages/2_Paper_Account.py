@@ -4,6 +4,11 @@ import pandas as pd
 import urllib.request
 from datetime import datetime, timezone
 
+
+# ==========================================
+# PAGE CONFIGURATION
+# ==========================================
+
 st.set_page_config(
     page_title="Destiny AI | Paper Account",
     page_icon="🧪",
@@ -27,7 +32,17 @@ h2, h3 {font-size: 1.15rem !important;}
 
 
 # ==========================================
-# ANDROID NOTIFICATION CONNECTION
+# TIME FUNCTION
+# ==========================================
+
+def current_time():
+    return datetime.now(timezone.utc).strftime(
+        "%Y-%m-%d %H:%M"
+    )
+
+
+# ==========================================
+# ANDROID NOTIFICATION
 # ==========================================
 
 def send_app_notification(title, message):
@@ -35,26 +50,29 @@ def send_app_notification(title, message):
         topic = st.secrets.get("NTFY_TOPIC", "").strip()
 
         if not topic:
-            st.error("NTFY_TOPIC is missing from Streamlit Secrets.")
-            return False
+            return False, "NTFY_TOPIC is missing from Secrets."
 
         request = urllib.request.Request(
             f"https://ntfy.sh/{topic}",
             data=message.encode("utf-8"),
             headers={"Title": title},
-            method="POST"
+            method="POST",
         )
 
-        with urllib.request.urlopen(request, timeout=10) as response:
-            return response.status in (200, 201)
+        with urllib.request.urlopen(
+            request, timeout=15
+        ) as response:
+            if response.status in (200, 201):
+                return True, "Notification sent."
+
+            return False, f"Server returned status {response.status}."
 
     except Exception as error:
-        st.error(f"Notification error: {error}")
-        return False
+        return False, str(error)
 
 
 # ==========================================
-# PAPER ACCOUNT
+# PAGE TITLE
 # ==========================================
 
 st.title("DESTINY AI - PAPER ACCOUNT")
@@ -64,13 +82,13 @@ st.caption(
 )
 
 st.warning(
-    "SIMULATION ONLY — No bank, broker, wallet or payment "
+    "SIMULATION ONLY - No bank, broker, wallet or payment "
     "service is connected. All balances are virtual."
 )
 
 
 # ==========================================
-# INITIAL ACCOUNT DATA
+# INITIAL ACCOUNT
 # ==========================================
 
 if "paper_balance" not in st.session_state:
@@ -78,9 +96,7 @@ if "paper_balance" not in st.session_state:
 
 if "paper_transactions" not in st.session_state:
     st.session_state.paper_transactions = [{
-        "Time (UTC)": datetime.now(timezone.utc).strftime(
-            "%Y-%m-%d %H:%M"
-        ),
+        "Time (UTC)": current_time(),
         "Type": "Starting virtual balance",
         "Amount": 10000.00,
         "Virtual balance": 10000.00,
@@ -93,34 +109,40 @@ if "paper_transactions" not in st.session_state:
 
 st.subheader("Virtual account overview")
 
-a, b = st.columns(2)
+col1, col2 = st.columns(2)
 
-a.metric(
+col1.metric(
     "Virtual balance",
     f"${st.session_state.paper_balance:,.2f}"
 )
 
-b.metric("Account type", "Paper only")
+col2.metric(
+    "Account type",
+    "Paper only"
+)
 
 st.divider()
 
 
 # ==========================================
-# SIMULATION CONTROLS
+# VIRTUAL ADJUSTMENTS
 # ==========================================
 
 st.subheader("Simulation controls")
 
 st.write(
-    "Adjust your practice balance. These changes are "
-    "virtual and are not real financial transactions."
+    "Adjust your virtual practice balance. "
+    "These are not real financial transactions."
 )
 
 with st.form("paper_adjustment"):
 
     action = st.radio(
         "Choose a virtual adjustment",
-        ["Add virtual funds", "Remove virtual funds"],
+        [
+            "Add virtual funds",
+            "Remove virtual funds",
+        ],
     )
 
     amount = st.number_input(
@@ -138,7 +160,7 @@ with st.form("paper_adjustment"):
 
 
 # ==========================================
-# PROCESS VIRTUAL ADJUSTMENT
+# PROCESS ADJUSTMENT
 # ==========================================
 
 if submitted:
@@ -148,50 +170,51 @@ if submitted:
     if action == "Add virtual funds":
 
         st.session_state.paper_balance += amount
-        tx_type = "Virtual funds added"
+        transaction_type = "Virtual funds added"
         signed_amount = amount
 
     elif amount <= st.session_state.paper_balance:
 
         st.session_state.paper_balance -= amount
-        tx_type = "Virtual funds removed"
+        transaction_type = "Virtual funds removed"
         signed_amount = -amount
 
     else:
 
         st.error(
-            "The adjustment cannot exceed the current "
+            "The adjustment cannot exceed your current "
             "virtual balance."
         )
         st.stop()
 
     st.session_state.paper_transactions.insert(0, {
-        "Time (UTC)": datetime.now(timezone.utc).strftime(
-            "%Y-%m-%d %H:%M"
-        ),
-        "Type": tx_type,
+        "Time (UTC)": current_time(),
+        "Type": transaction_type,
         "Amount": signed_amount,
         "Virtual balance": st.session_state.paper_balance,
     })
 
-     st.success("Virtual account updated.")
+    st.success("Virtual account updated.")
 
-    notification_sent = send_app_notification(
-        "Destiny AI — Paper Account",
-        (
-            f"{tx_type}\n"
-            f"Amount: ${amount:,.2f}\n"
-            f"New virtual balance: "
-            f"${st.session_state.paper_balance:,.2f}"
-        ),
+    notification_ok, notification_message = (
+        send_app_notification(
+            "Destiny AI - Paper Account",
+            (
+                f"{transaction_type}\n"
+                f"Amount: ${amount:,.2f}\n"
+                f"New virtual balance: "
+                f"${st.session_state.paper_balance:,.2f}"
+            ),
+        )
     )
 
-    if notification_sent:
+    if notification_ok:
         st.success("Android notification sent.")
     else:
         st.warning(
-            "Account updated, but notification could not be sent."
+            "Account updated, but notification failed."
         )
+        st.caption(notification_message)
 
 
 st.divider()
@@ -218,7 +241,9 @@ st.dataframe(
 # CSV DOWNLOAD
 # ==========================================
 
-csv_data = history.to_csv(index=False).encode("utf-8")
+csv_data = history.to_csv(
+    index=False
+).encode("utf-8")
 
 st.download_button(
     "Download virtual history (CSV)",
@@ -241,9 +266,7 @@ if st.button(
     st.session_state.paper_balance = 10000.00
 
     st.session_state.paper_transactions = [{
-        "Time (UTC)": datetime.now(timezone.utc).strftime(
-            "%Y-%m-%d %H:%M"
-        ),
+        "Time (UTC)": current_time(),
         "Type": "Virtual account reset",
         "Amount": 10000.00,
         "Virtual balance": 10000.00,
@@ -259,5 +282,5 @@ if st.button(
 st.caption(
     "Virtual account values are stored in the current "
     "Streamlit session and may reset when the session restarts. "
-    "This is not a live account."
+    "This is not a live broker account."
 )
