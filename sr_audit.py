@@ -385,66 +385,69 @@ def main():
             f"[CHECK] Pivot confirmation test could not complete: {exc}"
         )
 
-    # -----------------------------------------------------
-    # 3. SUPPORT AND RESISTANCE FIXTURES
-    # -----------------------------------------------------
+# -----------------------------------------------------
+# 3. SUPPORT AND RESISTANCE FIXTURES
+# -----------------------------------------------------
 
-    for side in ("Support", "Resistance"):
+for side in ("Support", "Resistance"):
 
-        try:
-            broken_data, pivot_i = make_zone_fixture(
-                side, break_level=True
-            )
+    try:
+        broken_data, pivot_i = make_zone_fixture(
+            side, break_level=True
+        )
 
-            intact_data, _ = make_zone_fixture(
-                side, break_level=False
-            )
+        intact_data, _ = make_zone_fixture(
+            side, break_level=False
+        )
 
-            broken_zones = engine.analyze_sr(
-                broken_data, pivot_length=8
-            )
-            intact_zones["Pivot Time"].astype(str).eq(pivot_time)
+        # Generate both zone DataFrames before checking them
+        intact_zones = engine.analyze_sr(
+            intact_data, pivot_length=8
+        )
 
-            pivot_time = str(
-                broken_data.index[pivot_i]
-            )
+        broken_zones = engine.analyze_sr(
+            broken_data, pivot_length=8
+        )
 
-            intact_has_zone = (
-                not intact_zones.empty
-                and (
-                    intact_zones["Side"].eq(side)
-                    & intact_zones["Confirmed Time"]
-                    .astype(str).eq(pivot_time)
-                ).any()
-            )
+        pivot_time = str(broken_data.index[pivot_i])
 
-            broken_has_zone = (
-                not broken_zones.empty
-                and (
-                    broken_zones["Side"].eq(side)
-                    & broken_zones["Confirmed Time"]
-                    .astype(str).eq(pivot_time)
-                ).any()
-            )
+        # Use Pivot Time, not Confirmed Time
+        intact_has_zone = (
+            not intact_zones.empty
+            and (
+                intact_zones["Side"].eq(side)
+                & intact_zones["Pivot Time"]
+                .astype(str).eq(pivot_time)
+            ).any()
+        )
 
-            report(
-                f"{side} fixture creates target pivot zone",
-                bool(intact_has_zone),
-                pivot_time
-            )
+        broken_has_zone = (
+            not broken_zones.empty
+            and (
+                broken_zones["Side"].eq(side)
+                & broken_zones["Pivot Time"]
+                .astype(str).eq(pivot_time)
+            ).any()
+        )
 
-            report(
-                f"{side} broken target zone removed",
-                bool(intact_has_zone and not broken_has_zone),
-                "Target zone absent after close-through"
-                if not broken_has_zone
-                else "Target zone remains; review engine behavior"
-            )
+        report(
+            f"{side} fixture creates target pivot zone",
+            bool(intact_has_zone),
+            pivot_time
+        )
 
-        except Exception as exc:
-            print(
-                f"[CHECK] {side} fixture could not complete: {exc}"
-            )
+        report(
+            f"{side} broken target zone removed",
+            bool(intact_has_zone and not broken_has_zone),
+            "Target zone absent after close-through"
+            if not broken_has_zone
+            else "Target zone remains; review engine behavior"
+        )
+
+    except Exception as exc:
+        print(
+            f"[CHECK] {side} fixture could not complete: {exc}"
+        )
 
     # -----------------------------------------------------
     # 4. OVERLAP DIAGNOSTIC
