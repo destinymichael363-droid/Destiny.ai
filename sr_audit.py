@@ -51,6 +51,50 @@ def zone_signature(df):
             for _, r in df.iterrows()}
 
 
+
+def make_zone_fixture(side, break_level=False):
+    # Construct a deterministic, flat synthetic series with one unique pivot.
+    n = 60
+    close = np.full(n, 100.0)
+    open_ = close.copy()
+    high = np.full(n, 101.0)
+    low = np.full(n, 99.0)
+    pivot = 25
+    if side == "Support":
+        low[pivot] = 80.0
+        close[pivot] = 90.0
+        open_[pivot] = 95.0
+        if break_level:
+            close[pivot + 12:] = 70.0
+            open_[pivot + 12:] = 75.0
+            high[pivot + 12:] = 76.0
+            low[pivot + 12:] = 69.0
+    else:
+        high[pivot] = 120.0
+        close[pivot] = 110.0
+        open_[pivot] = 105.0
+        if break_level:
+            close[pivot + 12:] = 130.0
+            open_[pivot + 12:] = 125.0
+            high[pivot + 12:] = 131.0
+            low[pivot + 12:] = 124.0
+    return pd.DataFrame({"Open": open_, "High": high, "Low": low, "Close": close,
+                        "Volume": np.ones(n)}, index=pd.date_range("2025-02-01", periods=n, freq="h")), pivot
+
+def count_overlapping_zone_pairs(zones):
+    if zones is None or zones.empty or len(zones) < 2:
+        return 0
+    overlaps = 0
+    records = zones.to_dict("records")
+    for i in range(len(records)):
+        for j in range(i + 1, len(records)):
+            if records[i]["Side"] != records[j]["Side"]:
+                continue
+            if max(records[i]["Zone Low"], records[j]["Zone Low"]) <= min(records[i]["Zone High"], records[j]["Zone High"]):
+                overlaps += 1
+    return overlaps
+
+
 def main():
     print("\nDESTINY AI — S/R HISTORICAL INTEGRITY AUDIT")
     print("Synthetic diagnostic candles only; no market data or trading signals.\n")
@@ -94,6 +138,26 @@ def main():
     target_after = any(p["index"] == target_idx and p["side"] == "Resistance" for p in confirmed)
     report("Pivot absent before confirmation candle", not target_before, f"target pivot index {target_idx}")
     report("Pivot present at confirmation", target_after, f"length={length}, pivot={target_idx}")
+
+    # Targeted invalidation fixtures: diagnostic CHECK if the targeted level remains.
+    for side in ("Support", "Resistance"):
+        broken_data, pivot_i = make_zone_fixture(side, break_level=True)
+        intact_data, _ = make_zone_fixture(side, break_level=False)
+        broken_zones = engine.analyze_sr(broken_data, pivot_length=8)
+        intact_zones = engine.analyze_sr(intact_data, pivot_length=8)
+        pivot_time = str(broken_data.index[pivot_i])
+        intact_has_pivot_zone = (not intact_zones.empty) and (
+            (intact_zones["Side"].eq(side) & intact_zones["Confirmed Time"].astype(str).eq(pivot_time)).any()
+        )
+        broken_has_pivot_zone = (not broken_zones.empty) and (
+            (broken_zones["Side"].eq(side) & broken_zones["Confirmed Time"].astype(str).eq(pivot_time)).any()
+        )
+        report(f"{side} fixture creates target pivot zone", bool(intact_has_pivot_zone), pivot_time)
+        report(f"{side} broken target zone removed", bool(intact_has_pivot_zone and not broken_has_pivot_zone),
+               "target zone absent after close-through invalidation" if not broken_has_pivot_zone else "target zone still present; review fixture/engine behavior")
+
+    overlap_count = count_overlapping_zone_pairs(zones)
+    report("Same-side overlapping zones counted (diagnostic)", True, f"{overlap_count} overlapping pairs; not an automatic defect")
 
     # Compare current active-zone sets at a 70% cut and full history. Differences
     # are expected from later invalidations/reactions and are shown as diagnostics.
