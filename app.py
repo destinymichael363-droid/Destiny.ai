@@ -1,7 +1,7 @@
 from mtf_context import build_mtf_context
 from strategy_engine import analyze_market
 from sr_engine import analyze_sr
-
+from auth_guard import require_login
 import streamlit as st
 import pandas as pd
 import yfinance as yf
