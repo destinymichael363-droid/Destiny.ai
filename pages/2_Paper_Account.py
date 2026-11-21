@@ -1,4 +1,4 @@
-
+from auth_guard import require_login
 import streamlit as st
 import pandas as pd
 import urllib.request
@@ -15,7 +15,7 @@ st.set_page_config(
     layout="centered",
     initial_sidebar_state="collapsed",
 )
-
+require_login()
 st.markdown("""
 <style>
 .block-container {
