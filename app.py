@@ -19,10 +19,9 @@ st.set_page_config(
     page_title="Destiny AI",
     page_icon="📊",
     layout="wide",
-    require_login()
     initial_sidebar_state="collapsed"
 )
-
+require_login()
 TIMEFRAMES = ["1D", "4H", "1H", "15M", "5M", "1M"]
 
 MARKETS = {
