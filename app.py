@@ -51,7 +51,7 @@ MARKETS = {
 # OPTIONAL ANDROID APP-STATUS NOTIFICATION
 # =========================================================
 
-def send_app_notification(title_message)
+
 
 def send_app_notification(title, message):
     try:
