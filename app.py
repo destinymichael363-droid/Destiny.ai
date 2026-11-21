@@ -243,35 +243,35 @@ def draw_sr_zones(fig, zones, data, start_time, end_time):
     if not all(c in zones.columns for c in required):
         return
 
+    latest_close = float(data["Close"].iloc[-1])
+    valid_zones = []
     for _, zone in zones.head(8).iterrows():
         try:
             side = str(zone["Side"]).upper()
             low = float(zone["Zone Low"])
             high = float(zone["Zone High"])
-            if pd.isna(low) or pd.isna(high) or low >= high:
+            if side not in {"SUPPORT", "RESISTANCE"} or pd.isna(low) or pd.isna(high) or low >= high:
                 continue
+            valid_zones.append((abs(((low + high) / 2) - latest_close), zone, side, low, high))
+        except Exception:
+            continue
 
-            zone_time = zone.get(
-                "Confirmed Time",
-                zone.get("Pivot Time", data.index[0])
-            )
+    # Draw all valid zones, but label only the three closest to current price.
+    label_keys = {id(item[1]) for item in sorted(valid_zones, key=lambda item: item[0])[:3]}
+    label_index = 0
+    for _, zone, side, low, high in valid_zones:
+        try:
+            zone_time = zone.get("Confirmed Time", zone.get("Pivot Time", data.index[0]))
             if pd.isna(zone_time):
                 zone_time = data.index[0]
             zone_time = align_timestamp(zone_time, start_time)
-
             after_confirmation = data[data.index >= zone_time]
             if side == "SUPPORT":
-                broken = after_confirmation[
-                    after_confirmation["Close"] < low
-                ]
-                fill, color = "rgba(0,192,135,0.13)", "#00C087"
-            elif side == "RESISTANCE":
-                broken = after_confirmation[
-                    after_confirmation["Close"] > high
-                ]
-                fill, color = "rgba(240,68,82,0.13)", "#F04452"
+                broken = after_confirmation[after_confirmation["Close"] < low]
+                fill, color = "rgba(0,192,135,0.10)", "#00C087"
             else:
-                continue
+                broken = after_confirmation[after_confirmation["Close"] > high]
+                fill, color = "rgba(240,68,82,0.10)", "#F04452"
 
             invalidated = not broken.empty
             zone_end = end_time
@@ -280,7 +280,6 @@ def draw_sr_zones(fig, zones, data, start_time, end_time):
                 if break_time < start_time:
                     continue
                 zone_end = min(break_time, end_time)
-
             zone_start = max(zone_time, start_time)
             if zone_start > zone_end:
                 continue
@@ -289,21 +288,26 @@ def draw_sr_zones(fig, zones, data, start_time, end_time):
             fig.add_shape(
                 type="rect", x0=zone_start, x1=zone_end,
                 y0=low, y1=high, fillcolor=fill,
-                line=dict(color=color, width=1), layer="below"
+                line=dict(color=color, width=0.8 if invalidated else 1.0,
+                          dash="dot" if invalidated else "solid"),
+                layer="below"
             )
             fig.add_shape(
                 type="line", x0=zone_start, x1=zone_end,
                 y0=midpoint, y1=midpoint,
-                line=dict(color=color, width=1, dash="dash"),
+                line=dict(color=color, width=0.8, dash="dot"),
                 layer="below"
             )
-            fig.add_annotation(
-                x=zone_end, y=midpoint,
-                text=f"{side} INVALIDATED" if invalidated else side,
-                showarrow=False, xanchor="right", yanchor="bottom",
-                font=dict(size=9, color=color),
-                bgcolor="rgba(20,20,20,0.85)"
-            )
+            if id(zone) in label_keys:
+                label = f"{side} · INVALID" if invalidated else side
+                fig.add_annotation(
+                    x=end_time, y=midpoint, text=label,
+                    showarrow=False, xanchor="right", yanchor="middle",
+                    yshift=(label_index - 1) * 11,
+                    font=dict(size=8, color=color),
+                    bgcolor="rgba(11,14,17,0.78)", borderpad=2
+                )
+                label_index += 1
         except Exception:
             continue
 
@@ -323,13 +327,14 @@ def draw_ob_fvg_overlaps(fig, setups, data, start_time, end_time):
         return 0
 
     drawn = 0
+    active_labels = 0
     for _, setup in setups.tail(100).iterrows():
+        if drawn >= 5:
+            break
         try:
-            ob_time = setup["ob_time"]
-            fvg_time = setup["fvg_time"]
+            ob_time, fvg_time = setup["ob_time"], setup["fvg_time"]
             if pd.isna(ob_time) or pd.isna(fvg_time):
                 continue
-
             ob_time = align_timestamp(ob_time, start_time)
             fvg_time = align_timestamp(fvg_time, start_time)
             overlap_time = max(ob_time, fvg_time)
@@ -338,63 +343,57 @@ def draw_ob_fvg_overlaps(fig, setups, data, start_time, end_time):
 
             ob_low, ob_high = float(setup["ob_low"]), float(setup["ob_high"])
             fvg_low, fvg_high = float(setup["fvg_low"]), float(setup["fvg_high"])
-            overlap_low = max(ob_low, fvg_low)
-            overlap_high = min(ob_high, fvg_high)
+            overlap_low, overlap_high = max(ob_low, fvg_low), min(ob_high, fvg_high)
             if overlap_low >= overlap_high:
                 continue
 
             direction = str(setup["direction"]).upper()
             if direction == "BULLISH":
-                color, fill = "#00C087", "rgba(0,192,135,0.20)"
-                invalid = (
-                    (data.index >= overlap_time)
-                    & (data["Close"] < max(ob_low, fvg_low))
-                )
+                color = "#00C087"
+                invalid = (data.index >= overlap_time) & (data["Close"] < max(ob_low, fvg_low))
             elif direction == "BEARISH":
-                color, fill = "#F04452", "rgba(240,68,82,0.20)"
-                invalid = (
-                    (data.index >= overlap_time)
-                    & (data["Close"] > min(ob_high, fvg_high))
-                )
+                color = "#F04452"
+                invalid = (data.index >= overlap_time) & (data["Close"] > min(ob_high, fvg_high))
             else:
                 continue
 
             invalid_rows = data.loc[invalid]
             setup_end = end_time
             status = str(setup.get("status", "ACTIVE")).upper()
-
             if not invalid_rows.empty:
-                invalid_time = align_timestamp(
-                    invalid_rows.index[0], start_time
-                )
+                invalid_time = align_timestamp(invalid_rows.index[0], start_time)
                 if invalid_time < start_time:
                     continue
-                setup_end = min(invalid_time, end_time)
-                status = "INVALIDATED"
+                setup_end, status = min(invalid_time, end_time), "INVALIDATED"
             elif status == "INVALIDATED":
                 continue
 
             visible_start = max(overlap_time, start_time)
             if visible_start > setup_end:
                 continue
+            invalidated = status == "INVALIDATED"
+            if invalidated:
+                fill = "rgba(240,68,82,0.035)" if direction == "BEARISH" else "rgba(0,192,135,0.035)"
+            else:
+                fill = "rgba(240,68,82,0.12)" if direction == "BEARISH" else "rgba(0,192,135,0.12)"
 
             fig.add_shape(
                 type="rect", x0=visible_start, x1=setup_end,
-                y0=overlap_low, y1=overlap_high,
-                fillcolor=fill,
-                line=dict(color=color, width=1.4),
+                y0=overlap_low, y1=overlap_high, fillcolor=fill,
+                line=dict(color=color, width=0.7 if invalidated else 1.0,
+                          dash="dot" if invalidated else "solid"),
                 layer="below"
             )
-            label = f"{direction} OB + FVG"
-            if status == "INVALIDATED":
-                label += " (INVALIDATED)"
-            fig.add_annotation(
-                x=visible_start,
-                y=(overlap_low + overlap_high) / 2,
-                text=label, showarrow=False, xanchor="left",
-                font=dict(size=9, color=color),
-                bgcolor="rgba(20,20,20,0.85)"
-            )
+            if not invalidated and active_labels < 2:
+                label = "BULL OB/FVG" if direction == "BULLISH" else "BEAR OB/FVG"
+                fig.add_annotation(
+                    x=end_time, y=(overlap_low + overlap_high) / 2,
+                    text=label, showarrow=False, xanchor="right",
+                    yanchor="middle", yshift=active_labels * 12,
+                    font=dict(size=8, color=color),
+                    bgcolor="rgba(11,14,17,0.82)", borderpad=2
+                )
+                active_labels += 1
             drawn += 1
         except Exception:
             continue
@@ -416,7 +415,13 @@ def display_chart(data, result, sr_zones, symbol, timeframe):
     start_time = chart_data.index[0]
     end_time = chart_data.index[-1]
     latest_close = float(chart_data["Close"].iloc[-1])
-    first_visible = chart_data.index[max(0, len(chart_data) - 90)]
+    visible_data = chart_data.tail(90)
+    first_visible = visible_data.index[0]
+    visible_low = float(visible_data["Low"].min())
+    visible_high = float(visible_data["High"].max())
+    visible_span = max(visible_high - visible_low, abs(latest_close) * 0.002)
+    y_padding = visible_span * 0.10
+    initial_y_range = [visible_low - y_padding, visible_high + y_padding]
     volume_data = chart_data["Volume"].fillna(0).to_numpy().reshape(-1, 1)
 
     fig = go.Figure()
@@ -495,7 +500,7 @@ def display_chart(data, result, sr_zones, symbol, timeframe):
         template="plotly_dark",
         paper_bgcolor="#0B0E11",
         plot_bgcolor="#0B0E11",
-        height=560,
+        height=640,
         autosize=True,
         margin=dict(l=8, r=82, t=58, b=35),
         font=dict(family="Arial, sans-serif", size=13, color="#D7DCE2"),
@@ -523,7 +528,8 @@ def display_chart(data, result, sr_zones, symbol, timeframe):
         ),
         yaxis=dict(
             side="right",
-            autorange=True,
+            range=initial_y_range,
+            autorange=False,
             fixedrange=False,
             showgrid=True,
             gridcolor="rgba(180,190,200,0.10)",
@@ -553,6 +559,8 @@ def display_chart(data, result, sr_zones, symbol, timeframe):
     )
 
     st.caption(
+        "Showing the latest 90 candles first; pan left to inspect the wider 1,200-candle history. "
+        "Use Autoscale in the toolbar after moving to a different period. "
         "Drag to pan | Pinch or use toolbar to zoom | "
         "Yellow = latest completed close | Green = support / bullish | "
         "Red = resistance / bearish | Dashed = S/R midpoint"
