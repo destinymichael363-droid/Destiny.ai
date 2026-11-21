@@ -538,7 +538,8 @@ def draw_ob_fvg_overlaps(fig, setups, data, start_time, end_time):
 # =========================================================
 
 def display_chart(data, result, sr_zones, symbol, timeframe):
-    chart_data = data.tail(120).copy()
+    # Fewer visible candles create more room for each candle body and wick.
+    chart_data = data.tail(90).copy()
 
     if chart_data.empty:
         st.warning("No candles are available.")
@@ -554,12 +555,12 @@ def display_chart(data, result, sr_zones, symbol, timeframe):
         high=chart_data["High"],
         low=chart_data["Low"],
         close=chart_data["Close"],
-        name="Candles",
-        increasing_line_color="#00C087",
-        decreasing_line_color="#F04452",
-        increasing_fillcolor="#00C087",
-        decreasing_fillcolor="#F04452",
-        whiskerwidth=0.8
+        name="Price",
+        increasing_line_color="#26A69A",
+        decreasing_line_color="#EF5350",
+        increasing_fillcolor="#26A69A",
+        decreasing_fillcolor="#EF5350",
+        whiskerwidth=1.0
     ))
 
     draw_sr_zones(
@@ -586,54 +587,91 @@ def display_chart(data, result, sr_zones, symbol, timeframe):
             try:
                 price = float(level["price"])
                 color = (
-                    "#F04452"
+                    "#EF5350"
                     if level["side"] == "BSL"
-                    else "#00C087"
+                    else "#26A69A"
                 )
 
                 fig.add_hline(
                     y=price,
                     line_dash="dot",
                     line_color=color,
-                    line_width=1
+                    line_width=1.3,
+                    opacity=0.9
                 )
-
             except Exception:
                 continue
 
     fig.update_layout(
         title=dict(
-            text=f"{symbol} | {timeframe}",
-            font=dict(size=17)
+            text=f"{symbol}  |  {timeframe}",
+            x=0.02,
+            xanchor="left",
+            font=dict(size=19, color="#E6EAF0")
         ),
         template="plotly_dark",
-        height=460,
+        paper_bgcolor="#0B0E11",
+        plot_bgcolor="#0B0E11",
+        height=560,
         autosize=True,
-        margin=dict(l=10, r=15, t=50, b=35),
-        font=dict(size=13),
+        margin=dict(l=12, r=22, t=58, b=42),
+        font=dict(
+            family="Arial, sans-serif",
+            size=14,
+            color="#D7DCE2"
+        ),
+        hoverlabel=dict(
+            bgcolor="#20262D",
+            bordercolor="#59636E",
+            font=dict(size=13, color="#FFFFFF")
+        ),
+        hovermode="x",
         xaxis=dict(
-            title="Time",
+            title=None,
             type="date",
             range=[start_time, end_time],
             rangeslider=dict(visible=False),
             tickformat="%d %b",
-            nticks=6,
-            tickfont=dict(size=11),
+            nticks=5,
+            tickfont=dict(size=13, color="#C5CBD3"),
             showgrid=True,
-            gridcolor="rgba(130,130,130,0.15)",
-            automargin=True
+            gridcolor="rgba(180,190,200,0.10)",
+            zeroline=False,
+            showline=True,
+            linecolor="#3A424B",
+            linewidth=1,
+            ticks="outside",
+            tickcolor="#68727D",
+            automargin=True,
+            showspikes=True,
+            spikemode="across",
+            spikesnap="cursor",
+            spikethickness=1,
+            spikecolor="rgba(210,220,230,0.45)"
         ),
         yaxis=dict(
-            title="Price",
+            title=None,
             side="right",
             autorange=True,
-            tickfont=dict(size=12),
+            tickfont=dict(size=13, color="#C5CBD3"),
             showgrid=True,
-            gridcolor="rgba(130,130,130,0.15)",
-            automargin=True
+            gridcolor="rgba(180,190,200,0.10)",
+            zeroline=False,
+            showline=True,
+            linecolor="#3A424B",
+            linewidth=1,
+            ticks="outside",
+            tickcolor="#68727D",
+            automargin=True,
+            showspikes=True,
+            spikemode="across",
+            spikesnap="cursor",
+            spikethickness=1,
+            spikecolor="rgba(210,220,230,0.45)"
         ),
         showlegend=False,
-        dragmode="pan"
+        dragmode="pan",
+        hoverdistance=30
     )
 
     st.plotly_chart(
@@ -642,7 +680,11 @@ def display_chart(data, result, sr_zones, symbol, timeframe):
         config={
             "scrollZoom": True,
             "displaylogo": False,
-            "responsive": True
+            "responsive": True,
+            "modeBarButtonsToRemove": [
+                "select2d",
+                "lasso2d"
+            ]
         }
     )
 
