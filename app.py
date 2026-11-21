@@ -345,7 +345,7 @@ def draw_ob_fvg_overlaps(fig, setups, data, start_time, end_time):
             fvg_high = float(setup["fvg_high"])
 
             # Intersection of the OB and FVG price ranges.
-            overlap_low = max(ob_low, fvg_low)
+            & (data["Close"] < max(ob_low, fvg_low))
             overlap_high = min(ob_high, fvg_high)
             if not all(pd.notna(v) for v in [
                 ob_low, ob_high, fvg_low, fvg_high
