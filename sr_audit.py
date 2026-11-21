@@ -1,9 +1,8 @@
 
 # =========================================================
 # DESTINY AI - S/R ENGINE AUDIT
-# PHASE 2 — CORRECTED
-# Synthetic diagnostic candles only.
-# No market data or trading signals.
+# Corrected historical integrity diagnostic
+# Synthetic candles only; no market data or trading signals.
 # =========================================================
 
 import importlib
@@ -13,9 +12,16 @@ import pandas as pd
 ENGINE_MODULE = "sr_engine"
 
 
+# =========================================================
+# 1. SYNTHETIC DATA
+# =========================================================
+
 def make_synthetic_candles(rows=600, seed=7):
     rng = np.random.default_rng(seed)
-    dates = pd.date_range("2024-01-01", periods=rows, freq="h")
+
+    dates = pd.date_range(
+        "2024-01-01", periods=rows, freq="h"
+    )
 
     drift = (
         np.sin(np.arange(rows) / 22.0) * 8
@@ -28,8 +34,9 @@ def make_synthetic_candles(rows=600, seed=7):
         + drift
     )
 
-    open_ = np.r_[close[0], close[:-1]] + rng.normal(
-        0, 0.6, rows
+    open_ = (
+        np.r_[close[0], close[:-1]]
+        + rng.normal(0, 0.6, rows)
     )
 
     high = np.maximum(open_, close) + rng.uniform(
@@ -117,12 +124,34 @@ def make_zone_fixture(side, break_level=False):
     return data, pivot
 
 
+# =========================================================
+# 2. AUDIT HELPERS
+# =========================================================
+
 def report(name, passed, details=""):
     status = "PASS" if passed else "CHECK"
-
     suffix = f" — {details}" if details else ""
 
     print(f"[{status}] {name}{suffix}")
+
+
+def get_pivot_fields(pivot):
+    if not isinstance(pivot, dict):
+        raise TypeError(
+            "Pivot record is not a dictionary."
+        )
+
+    return pivot.get("pivot_i"), pivot.get("side")
+
+
+def contains_target_pivot(pivots, target_idx, target_side):
+    for pivot in pivots:
+        pivot_index, side = get_pivot_fields(pivot)
+
+        if pivot_index == target_idx and side == target_side:
+            return True
+
+    return False
 
 
 def zone_signature(df):
@@ -130,9 +159,13 @@ def zone_signature(df):
         return set()
 
     required = {
-        "Side", "Zone Low", "Zone High",
-        "Confirmed Time", "Rejections",
-        "Strength", "Midline"
+        "Side",
+        "Zone Low",
+        "Zone High",
+        "Confirmed Time",
+        "Rejections",
+        "Strength",
+        "Midline"
     }
 
     if not required.issubset(df.columns):
@@ -158,60 +191,44 @@ def count_overlapping_zone_pairs(zones):
 
     for i in range(len(records)):
         for j in range(i + 1, len(records)):
+
             first = records[i]
             second = records[j]
 
             if first["Side"] != second["Side"]:
                 continue
 
-            overlap = (
-                max(first["Zone Low"], second["Zone Low"])
-                <= min(first["Zone High"], second["Zone High"])
-            )
-
-            if overlap:
+            if (
+                max(
+                    first["Zone Low"],
+                    second["Zone Low"]
+                )
+                <= min(
+                    first["Zone High"],
+                    second["Zone High"]
+                )
+            ):
                 overlaps += 1
 
     return overlaps
 
 
-def get_pivot_fields(pivot):
-    """
-    Read the pivot format returned by sr_engine.py.
-    The engine uses pivot_i rather than index.
-    """
-
-    if not isinstance(pivot, dict):
-        raise TypeError(
-            f"Expected pivot dictionary, got {type(pivot).__name__}"
-        )
-
-    pivot_index = pivot.get("pivot_i")
-    side = pivot.get("side")
-
-    return pivot_index, side
-
-
-def contains_target_pivot(pivots, target_idx, target_side):
-    for pivot in pivots:
-        pivot_index, side = get_pivot_fields(pivot)
-
-        if pivot_index == target_idx and side == target_side:
-            return True
-
-    return False
-
+# =========================================================
+# 3. MAIN AUDIT
+# =========================================================
 
 def main():
+
     print("\nDESTINY AI — S/R HISTORICAL INTEGRITY AUDIT")
     print(
         "Synthetic diagnostic candles only; "
         "no market data or trading signals.\n"
     )
 
+    # Load engine
     try:
         engine = importlib.import_module(ENGINE_MODULE)
-        importlib.reload(engine)
+        engine = importlib.reload(engine)
 
     except Exception as exc:
         print(f"[FAIL] Could not import S/R engine: {exc}")
@@ -226,11 +243,11 @@ def main():
         hasattr(engine, name)
         for name in required_functions
     ):
-        print("[FAIL] Required S/R functions are missing.")
+        print("[FAIL] Required S/R functions missing.")
         return
 
     # -----------------------------------------------------
-    # 1. GENERAL ENGINE TEST
+    # 4. GENERAL ENGINE TESTS
     # -----------------------------------------------------
 
     data = make_synthetic_candles()
@@ -264,7 +281,7 @@ def main():
     )
 
     if not isinstance(zones, pd.DataFrame):
-        print("[FAIL] Cannot continue zone checks.")
+        print("[FAIL] Zone output is not a DataFrame.")
         return
 
     columns = {
@@ -272,9 +289,11 @@ def main():
         "Zone Low",
         "Zone High",
         "Confirmed Time",
+        "Pivot Time",
         "Rejections",
         "Strength",
-        "Midline"
+        "Midline",
+        "Strong"
     }
 
     report(
@@ -291,6 +310,7 @@ def main():
         print("[CHECK] No zones detected.")
 
     else:
+
         report(
             "Zone side labels valid",
             zones["Side"].isin(
@@ -300,7 +320,10 @@ def main():
 
         report(
             "Zone bounds ordered",
-            (zones["Zone Low"] <= zones["Zone High"]).all()
+            (
+                zones["Zone Low"]
+                <= zones["Zone High"]
+            ).all()
         )
 
         report(
@@ -339,7 +362,7 @@ def main():
         )
 
     # -----------------------------------------------------
-    # 2. PIVOT CONFIRMATION TEST
+    # 5. PIVOT CONFIRMATION TEST
     # -----------------------------------------------------
 
     fixture = make_pivot_fixture()
@@ -350,6 +373,7 @@ def main():
     n_before = target_idx + pivot_length
 
     try:
+
         before = engine.find_confirmed_pivots(
             fixture.iloc[:n_before],
             length=pivot_length
@@ -361,11 +385,15 @@ def main():
         )
 
         target_before = contains_target_pivot(
-            before, target_idx, "Resistance"
+            before,
+            target_idx,
+            "Resistance"
         )
 
         target_after = contains_target_pivot(
-            confirmed, target_idx, "Resistance"
+            confirmed,
+            target_idx,
+            "Resistance"
         )
 
         report(
@@ -382,75 +410,88 @@ def main():
 
     except Exception as exc:
         print(
-            f"[CHECK] Pivot confirmation test could not complete: {exc}"
-        )
-
-# -----------------------------------------------------
-# 3. SUPPORT AND RESISTANCE FIXTURES
-# -----------------------------------------------------
-
-for side in ("Support", "Resistance"):
-
-    try:
-        broken_data, pivot_i = make_zone_fixture(
-            side, break_level=True
-        )
-
-        intact_data, _ = make_zone_fixture(
-            side, break_level=False
-        )
-
-        # Generate both zone DataFrames before checking them
-        intact_zones = engine.analyze_sr(
-            intact_data, pivot_length=8
-        )
-
-        broken_zones = engine.analyze_sr(
-            broken_data, pivot_length=8
-        )
-
-        pivot_time = str(broken_data.index[pivot_i])
-
-        # Use Pivot Time, not Confirmed Time
-        intact_has_zone = (
-            not intact_zones.empty
-            and (
-                intact_zones["Side"].eq(side)
-                & intact_zones["Pivot Time"]
-                .astype(str).eq(pivot_time)
-            ).any()
-        )
-
-        broken_has_zone = (
-            not broken_zones.empty
-            and (
-                broken_zones["Side"].eq(side)
-                & broken_zones["Pivot Time"]
-                .astype(str).eq(pivot_time)
-            ).any()
-        )
-
-        report(
-            f"{side} fixture creates target pivot zone",
-            bool(intact_has_zone),
-            pivot_time
-        )
-
-        report(
-            f"{side} broken target zone removed",
-            bool(intact_has_zone and not broken_has_zone),
-            "Target zone absent after close-through"
-            if not broken_has_zone
-            else "Target zone remains; review engine behavior"
-        )
-
-    except Exception as exc:
-        print(
-            f"[CHECK] {side} fixture could not complete: {exc}"
+            f"[CHECK] Pivot confirmation test error: {exc}"
         )
 
     # -----------------------------------------------------
-    # 4. OVERLAP DIAGNOSTIC
+    # 6. SUPPORT AND RESISTANCE FIXTURE TESTS
+    # -----------------------------------------------------
+
+    for side in ("Support", "Resistance"):
+
+        try:
+
+            broken_data, pivot_i = make_zone_fixture(
+                side,
+                break_level=True
+            )
+
+            intact_data, _ = make_zone_fixture(
+                side,
+                break_level=False
+            )
+
+            # Define BOTH outputs before checking either.
+            intact_zones = engine.analyze_sr(
+                intact_data,
+                pivot_length=8
+            )
+
+            broken_zones = engine.analyze_sr(
+                broken_data,
+                pivot_length=8
+            )
+
+            pivot_time = str(
+                intact_data.index[pivot_i]
+            )
+
+            # Compare actual pivot timestamps.
+            intact_has_zone = (
+                not intact_zones.empty
+                and (
+                    intact_zones["Side"].eq(side)
+                    & intact_zones["Pivot Time"]
+                    .astype(str).eq(pivot_time)
+                ).any()
+            )
+
+            broken_has_zone = (
+                not broken_zones.empty
+                and (
+                    broken_zones["Side"].eq(side)
+                    & broken_zones["Pivot Time"]
+                    .astype(str).eq(pivot_time)
+                ).any()
+            )
+
+            report(
+                f"{side} fixture creates target pivot zone",
+                bool(intact_has_zone),
+                pivot_time
+            )
+
+            report(
+                f"{side} broken target zone removed",
+                bool(
+                    intact_has_zone
+                    and not broken_has_zone
+                ),
+                (
+                    "Target zone absent after close-through"
+                    if not broken_has_zone
+                    else "Target zone remains; review engine behavior"
+                )
+            )
+
+        except Exception as exc:
+
+            print(
+                f"[CHECK] {side} fixture could not complete: {exc}"
+            )
+
+    # -----------------------------------------------------
+    # 7. OVERLAP DIAGNOSTIC
     # -----------------------------------------------------
 
     overlap_count = count_overlapping_zone_pairs(zones)
@@ -462,7 +503,7 @@ for side in ("Support", "Resistance"):
     )
 
     # -----------------------------------------------------
-    # 5. PREFIX/FULL HISTORY COMPARISON
+    # 8. PREFIX/FULL HISTORY COMPARISON
     # -----------------------------------------------------
 
     cut = int(len(data) * 0.70)
@@ -483,14 +524,22 @@ for side in ("Support", "Resistance"):
         f"{len(differences)} signatures differ; diagnostic only"
     )
 
+    # -----------------------------------------------------
+    # 9. FINAL REPORT
+    # -----------------------------------------------------
+
     print("\nINTERPRETATION")
+
     print(
-        "Different zone sets alone do not prove look-ahead bias."
+        "Different zone sets alone do not prove "
+        "look-ahead bias."
     )
+
     print(
         "This audit does not certify historical replay "
         "as look-ahead-free."
     )
+
     print("\nS/R audit completed.")
 
 
