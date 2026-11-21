@@ -1,4 +1,3 @@
-
 import streamlit as st
 from supabase import create_client
 
@@ -11,37 +10,78 @@ def get_supabase():
 
 def sign_up(email, password):
     supabase = get_supabase()
+
     return supabase.auth.sign_up({
         "email": email,
-        "password": password
+        "password": password,
     })
 
 
 def sign_in(email, password):
     supabase = get_supabase()
+
     response = supabase.auth.sign_in_with_password({
         "email": email,
-        "password": password
+        "password": password,
     })
 
     if response.session:
         st.session_state["supabase_access_token"] = (
             response.session.access_token
         )
+
         st.session_state["supabase_refresh_token"] = (
             response.session.refresh_token
         )
-        st.session_state["supabase_user"] = response.user.id
+
+        st.session_state["supabase_user"] = (
+            response.user.id
+        )
 
     return response
 
 
+def get_authenticated_supabase():
+    supabase = get_supabase()
+
+    access_token = st.session_state.get(
+        "supabase_access_token"
+    )
+
+    if not access_token:
+        return None
+
+    # Validate the token against Supabase Auth
+    user_response = supabase.auth.get_user(access_token)
+
+    if not user_response.user:
+        sign_out()
+        return None
+
+    # Attach the user's JWT to database requests
+    supabase.postgrest.auth(access_token)
+
+    return supabase
+
+
 def sign_out():
-    st.session_state.pop("supabase_access_token", None)
-    st.session_state.pop("supabase_refresh_token", None)
-    st.session_state.pop("supabase_user", None)
+    st.session_state.pop(
+        "supabase_access_token", None
+    )
+
+    st.session_state.pop(
+        "supabase_refresh_token", None
+    )
+
+    st.session_state.pop(
+        "supabase_user", None
+    )
 
 
 def is_authenticated():
-    return bool(st.session_state.get("supabase_user"))
-
+    return bool(
+        st.session_state.get("supabase_user")
+        and st.session_state.get(
+            "supabase_access_token"
+        )
+        )
