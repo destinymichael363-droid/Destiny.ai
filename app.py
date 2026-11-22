@@ -1,5 +1,4 @@
 annotationstions_future__ import annotations
-from __future__ import annotations
 from setup_bridge import register_setups
 from datetime import datetime, timezone
 import urllib.request
@@ -41,6 +40,7 @@ try:
         "Virtual Practice Balance",
         f"{account['balance']:,.2f}"
 )
+from __future__ import annotations    
 from setup_bridge import register_setups
 from datetime import datetime, timezone
 import urllib.request
