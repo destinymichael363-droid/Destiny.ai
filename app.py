@@ -10,7 +10,6 @@ import yfinance as yf
 
 from auth_and_store import authenticate_user, register_user
 from broker_and_account import BrokerSession, VirtualAccount
-from mtf_runner import run_closed_candle_5tf_cascade
 from ob_fvg_engine import run_ob_fvg_engine
 from sr_engine import run_sr_zones_engine
 
@@ -106,7 +105,6 @@ def render_auth_gate() -> bool:
     return False
 
 
-def build_chart(df: pd.DataFrame, title: str, sr_zones: list, paired_zones: list, sig_df: pd.DataFrame) -> go.Figure:
 def _resolve_x_index(df: pd.DataFrame, obj: object, attr_names: tuple[str, ...]) -> int:
     if df.empty:
         return 0
@@ -120,12 +118,10 @@ def _resolve_x_index(df: pd.DataFrame, obj: object, attr_names: tuple[str, ...])
     if raw_val is None:
         return 0
 
-    # If it's already an integer bar position
     if isinstance(raw_val, (int, float)) and not isinstance(raw_val, bool):
         pos = int(raw_val)
         return max(0, min(pos, len(df) - 1))
 
-    # If it's a timestamp / index value, match nearest bar in df.index
     try:
         idx_loc = df.index.get_indexer([raw_val], method="nearest")[0]
         if idx_loc >= 0:
@@ -161,7 +157,6 @@ def build_chart(
 
     x_end = df.index[-1]
 
-    # Support & Resistance zones (safe attribute lookup)
     for sz in (sr_zones or [])[-6:]:
         zone_type = str(getattr(sz, "zone_type", "support")).lower()
         is_support = zone_type == "support"
@@ -179,7 +174,6 @@ def build_chart(
             line=dict(color=line_c, width=1),
         )
 
-    # Paired OB + FVG zones (safe attribute lookup)
     for pz in (paired_zones or [])[-6:]:
         direction = int(getattr(pz, "direction", 1))
         fill_c = "rgba(52, 152, 219, 0.16)" if direction == 1 else "rgba(155, 89, 182, 0.16)"
@@ -199,7 +193,6 @@ def build_chart(
             line=dict(color=line_c, width=1, dash="dot"),
         )
 
-    # Break of Structure (BOS) lines
     if sig_df is not None and not sig_df.empty and "bos_level" in sig_df.columns:
         bos_rows = sig_df[sig_df["bos_level"].notna()].tail(6)
         for idx_pos, row in bos_rows.iterrows():
@@ -208,60 +201,6 @@ def build_chart(
                     go.Scatter(
                         x=[idx_pos, x_end],
                         y=[float(row["bos_level"]), float(row["bos_level"])],
-                        mode="lines",
-                        line=dict(dash="dash", width=1),
-                        name="BOS",
-                        showlegend=False,
-                    )
-                )
-
-    fig.update_layout(
-        title=title,
-        template="plotly_dark",
-        xaxis_rangeslider_visible=False,
-        height=520,
-        margin=dict(l=10, r=10, t=40, b=10),
-    )
-    return fig
-
-        ))
-   )
-
-    x_end = df.index[-1]
-
-    for sz in sr_zones[-6:]:
-        color = "rgba(46, 204, 113, 0.16)" if sz.zone_type == "support" else "rgba(231, 76, 60, 0.16)"
-        line_c = "rgba(46, 204, 113, 0.7)" if sz.zone_type == "support" else "rgba(231, 76, 60, 0.7)"
-        fig.add_shape(
-            type="rect",
-            x0=df.index[max(0, min(sz.start_idx, len(df) - 1))],
-            x1=x_end,
-            y0=sz.bottom,
-            y1=sz.top,
-            fillcolor=color,
-            line=dict(color=line_c, width=1),
-        )
-
-    for pz in paired_zones[-6:]:
-        fill = "rgba(52, 152, 219, 0.16)" if pz.direction == 1 else "rgba(155, 89, 182, 0.16)"
-        fig.add_shape(
-            type="rect",
-            x0=df.index[max(0, min(pz.ob_start_idx, len(df) - 1))],
-            x1=x_end,
-            y0=min(pz.ob_low, pz.fvg_low),
-            y1=max(pz.ob_high, pz.fvg_high),
-            fillcolor=fill,
-            line=dict(width=1, dash="dot"),
-        )
-
-    if not sig_df.empty and "bos_level" in sig_df.columns:
-        bos_rows = sig_df[sig_df["bos_level"].notna()].tail(6)
-        for idx_pos, row in bos_rows.iterrows():
-            if idx_pos in df.index:
-                fig.add_trace(
-                    go.Scatter(
-                        x=[idx_pos, x_end],
-                        y=[row["bos_level"], row["bos_level"]],
                         mode="lines",
                         line=dict(dash="dash", width=1),
                         name="BOS",
