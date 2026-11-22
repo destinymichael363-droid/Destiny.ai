@@ -1,193 +1,206 @@
+"""
+DESTINY AI — SUPPORT & RESISTANCE ENGINE
+Version: 4.0
 
-# =========================================================
-# DESTINY AI — SWING S/R ZONES
-# CLEAN CHRONOLOGICAL ENGINE V3
-# Educational chart visualization only.
-# =========================================================
+Purpose
+-------
+Historical chart analysis and virtual-paper-testing support only.
+This module does not execute trades or connect to a broker.
+
+Design
+------
+- Finds confirmed swing highs and lows using a symmetric pivot window.
+- A pivot is not available until `pivot_length` completed candles have
+  formed to its right.
+- Builds support/resistance zones from ATR measured at the pivot candle.
+- Replays candles chronologically so a zone cannot react to candles that
+  occurred before the zone was confirmed.
+- Uses completed-candle CLOSE invalidation by default.
+- Counts a rejection only after an initial visit, a departure, and a
+  subsequent visit that closes on the expected side of the zone.
+- Keeps the public function names and main output columns compatible
+  with the previous Destiny AI S/R engine.
+"""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Literal
+from typing import Literal, Optional
 
+import numpy as np
 import pandas as pd
 
 
 InvalidationMode = Literal["Wick", "Close"]
 
-_REQUIRED = {"High", "Low", "Close"}
 
+OUTPUT_COLUMNS = [
+    "Side",
+    "Zone Low",
+    "Zone High",
+    "Confirmed Time",
+    "Pivot Time",
+    "Rejections",
+    "Strength",
+    "Midline",
+    "Strong",
+]
 
-# =========================================================
-# 1. S/R ZONE MODEL
-# =========================================================
-
-@dataclass
-class SRZone:
-    side: str
-    low: float
-    high: float
-    pivot_time: object
-    confirmed_time: object
-    rejections: int = 0
-
-    # 0 = waiting for first touch
-    # 1 = touched, waiting to leave
-    # 2 = left zone, waiting for a new visit
-    state: int = 0
-
-
-# =========================================================
-# 2. DATA VALIDATION
-# =========================================================
 
 def _validate_data(data: pd.DataFrame) -> pd.DataFrame:
-
+    """Return a clean, chronological OHLC frame or raise a useful error."""
     if not isinstance(data, pd.DataFrame):
-        raise TypeError("data must be a pandas DataFrame")
+        raise TypeError("S/R input must be a pandas DataFrame.")
 
-    missing = _REQUIRED.difference(data.columns)
-
+    required = ["High", "Low", "Close"]
+    missing = [column for column in required if column not in data.columns]
     if missing:
         raise ValueError(
-            f"Missing candle columns: {', '.join(sorted(missing))}"
+            "S/R input is missing required columns: " + ", ".join(missing)
         )
 
-    frame = data.copy()
+    clean = data.copy()
+    for column in required:
+        clean[column] = pd.to_numeric(clean[column], errors="coerce")
 
-    for col in ("High", "Low", "Close"):
-        frame[col] = pd.to_numeric(
-            frame[col],
-            errors="coerce"
-        )
+    clean = clean.replace([np.inf, -np.inf], np.nan)
+    clean = clean.dropna(subset=required)
+    clean = clean.sort_index()
+    clean = clean[~clean.index.duplicated(keep="last")]
 
-    frame = frame.dropna(
-        subset=["High", "Low", "Close"]
-    )
+    if clean.empty:
+        raise ValueError("S/R input has no valid OHLC candles.")
 
-    if (frame["High"] < frame["Low"]).any():
-        raise ValueError(
-            "Candle High cannot be below Low"
-        )
+    invalid_range = clean["High"] < clean["Low"]
+    if invalid_range.any():
+        raise ValueError("S/R input contains candles where High is below Low.")
 
-    if frame.empty:
-        raise ValueError("No valid candle data supplied")
-
-    return frame
+    return clean
 
 
-# =========================================================
-# 3. ATR CALCULATION
-# =========================================================
-
-def calculate_atr(
-    data: pd.DataFrame,
-    period: int = 14
-) -> pd.Series:
-
+def calculate_atr(data: pd.DataFrame, period: int = 14) -> pd.Series:
+    """Calculate Wilder-style ATR using only the supplied candle history."""
     if period < 1:
-        raise ValueError("period must be >= 1")
+        raise ValueError("ATR period must be at least 1.")
 
-    frame = _validate_data(data)
-
-    previous_close = frame["Close"].shift(1)
+    clean = _validate_data(data)
+    previous_close = clean["Close"].shift(1)
 
     true_range = pd.concat(
         [
-            frame["High"] - frame["Low"],
-            (frame["High"] - previous_close).abs(),
-            (frame["Low"] - previous_close).abs(),
+            clean["High"] - clean["Low"],
+            (clean["High"] - previous_close).abs(),
+            (clean["Low"] - previous_close).abs(),
         ],
-        axis=1
+        axis=1,
     ).max(axis=1)
 
-    atr = pd.Series(
-        float("nan"),
-        index=frame.index,
-        dtype=float
-    )
+    # Wilder smoothing; min_periods keeps early, under-sampled ATR values NaN.
+    atr = true_range.ewm(
+        alpha=1.0 / period,
+        adjust=False,
+        min_periods=period,
+    ).mean()
 
-    if len(true_range) >= period:
+    # A usable fallback for short histories, without fabricating price data.
+    fallback = true_range.expanding(min_periods=1).mean()
+    return atr.fillna(fallback).rename("ATR")
 
-        seed_pos = period - 1
-
-        atr.iloc[seed_pos] = (
-            true_range.iloc[:period].mean()
-        )
-
-        for i in range(seed_pos + 1, len(true_range)):
-
-            atr.iloc[i] = (
-                atr.iloc[i - 1] * (period - 1)
-                + true_range.iloc[i]
-            ) / period
-
-    return atr
-
-
-# =========================================================
-# 4. CONFIRMED SWING PIVOTS
-# =========================================================
 
 def find_confirmed_pivots(
     data: pd.DataFrame,
-    length: int = 8
-) -> list[dict]:
+    length: int = 8,
+) -> pd.DataFrame:
+    """
+    Find confirmed swing highs/lows.
 
-    if length < 2:
-        raise ValueError("length must be >= 2")
+    The returned row is timestamped at the candle where the pivot becomes
+    confirmed, while Pivot Time identifies the original swing candle.
+    Equal highs/lows are handled deterministically: the first occurrence
+    in the pivot window is retained.
+    """
+    if length < 1:
+        raise ValueError("Pivot length must be at least 1.")
 
-    frame = _validate_data(data)
-
-    highs = frame["High"].to_numpy()
-    lows = frame["Low"].to_numpy()
+    clean = _validate_data(data)
+    atr = calculate_atr(clean, period=14)
 
     records = []
+    highs = clean["High"].to_numpy(dtype=float)
+    lows = clean["Low"].to_numpy(dtype=float)
+    index = clean.index
 
-    for confirm_i in range(length * 2, len(frame)):
+    # i is the pivot candle; confirmation occurs `length` bars later.
+    for i in range(length, len(clean) - length):
+        left = i - length
+        right = i + length + 1
 
-        pivot_i = confirm_i - length
+        high_window = highs[left:right]
+        low_window = lows[left:right]
 
-        left = pivot_i - length
-        right = confirm_i
+        is_pivot_high = (
+            highs[i] == np.max(high_window)
+            and np.argmax(high_window) == length
+        )
+        is_pivot_low = (
+            lows[i] == np.min(low_window)
+            and np.argmin(low_window) == length
+        )
 
-        high_window = highs[left:right + 1]
-        low_window = lows[left:right + 1]
+        confirmation_position = i + length
+        if is_pivot_high:
+            records.append(
+                {
+                    "Position": confirmation_position,
+                    "Type": "RESISTANCE",
+                    "Price": float(highs[i]),
+                    "Pivot Time": index[i],
+                    "Confirmed Time": index[confirmation_position],
+                    "ATR": float(atr.iloc[i]),
+                }
+            )
 
-        # Unique swing high.
-        if (
-            len(high_window)
-            and highs[pivot_i] == high_window.max()
-            and (high_window == highs[pivot_i]).sum() == 1
-        ):
+        if is_pivot_low:
+            records.append(
+                {
+                    "Position": confirmation_position,
+                    "Type": "SUPPORT",
+                    "Price": float(lows[i]),
+                    "Pivot Time": index[i],
+                    "Confirmed Time": index[confirmation_position],
+                    "ATR": float(atr.iloc[i]),
+                }
+            )
 
-            records.append({
-                "side": "Resistance",
-                "pivot_i": pivot_i,
-                "confirm_i": confirm_i,
-                "price": float(highs[pivot_i])
-            })
-
-        # Unique swing low.
-        if (
-            len(low_window)
-            and lows[pivot_i] == low_window.min()
-            and (low_window == lows[pivot_i]).sum() == 1
-        ):
-
-            records.append({
-                "side": "Support",
-                "pivot_i": pivot_i,
-                "confirm_i": confirm_i,
-                "price": float(lows[pivot_i])
-            })
-
-    return records
+    columns = [
+        "Position",
+        "Type",
+        "Price",
+        "Pivot Time",
+        "Confirmed Time",
+        "ATR",
+    ]
+    return pd.DataFrame(records, columns=columns)
 
 
-# =========================================================
-# 5. MAIN CHRONOLOGICAL S/R ENGINE
-# =========================================================
+def _zone_bounds(
+    side: str,
+    pivot_price: float,
+    atr_at_pivot: float,
+    zone_atr: float,
+) -> tuple[float, float]:
+    """
+    Build a one-sided zone around the swing point.
+
+    Support extends below its swing low; resistance extends above its
+    swing high. Zone width is based on ATR at the original pivot candle.
+    """
+    safe_atr = atr_at_pivot if np.isfinite(atr_at_pivot) and atr_at_pivot > 0 else 0.0
+    width = safe_atr * zone_atr
+
+    if side == "SUPPORT":
+        return pivot_price - width, pivot_price
+    return pivot_price, pivot_price + width
+
 
 def analyze_sr(
     data: pd.DataFrame,
@@ -196,251 +209,200 @@ def analyze_sr(
     reaction_atr: float = 0.5,
     atr_length: int = 14,
     strength: int = 3,
-    invalid_mode: InvalidationMode = "Wick",
+    invalid_mode: InvalidationMode = "Close",
     max_zones: int = 40,
 ) -> pd.DataFrame:
-
     """
-    Chronological support and resistance zone replay.
+    Analyse chronological support/resistance zones.
 
-    A zone is created only after pivot confirmation.
+    Parameters retained for compatibility:
+      pivot_length: left/right bars required to confirm a swing.
+      zone_atr: zone width as a multiple of ATR at the pivot candle.
+      reaction_atr: reserved for future reaction-distance classification.
+      atr_length: ATR calculation period.
+      strength: rejection count needed for Strong=True.
+      invalid_mode: "Close" (recommended) or "Wick".
+      max_zones: maximum number of most recently confirmed zones returned.
 
-    IMPORTANT:
-    A newly confirmed zone is not processed against
-    its confirmation candle. Processing starts on
-    the following candle.
-
-    Zone width uses ATR at the original pivot candle.
-
-    zone_atr and reaction_atr remain in the signature
-    for compatibility with existing callers.
+    Output columns remain compatible with the previous Destiny AI app.
     """
+    del reaction_atr  # Kept in the public signature for compatibility.
 
-    frame = _validate_data(data)
-
-    if (
-        pivot_length < 2
-        or atr_length < 1
-        or strength < 1
-        or max_zones < 1
-    ):
-        raise ValueError("Invalid S/R settings")
-
+    if pivot_length < 1:
+        raise ValueError("pivot_length must be at least 1.")
+    if zone_atr < 0:
+        raise ValueError("zone_atr cannot be negative.")
+    if atr_length < 1:
+        raise ValueError("atr_length must be at least 1.")
+    if strength < 1:
+        raise ValueError("strength must be at least 1.")
+    if max_zones < 1:
+        raise ValueError("max_zones must be at least 1.")
     if invalid_mode not in ("Wick", "Close"):
-        raise ValueError(
-            "invalid_mode must be 'Wick' or 'Close'"
-        )
+        raise ValueError("invalid_mode must be either 'Wick' or 'Close'.")
 
-    # Calculate ATR.
-    atr = calculate_atr(
-        frame,
-        atr_length
-    )
+    clean = _validate_data(data)
+    if len(clean) < (pivot_length * 2 + 1):
+        return pd.DataFrame(columns=OUTPUT_COLUMNS)
 
-    # Organize pivots by their confirmation candle.
-    pivots_by_confirm = {}
+    atr = calculate_atr(clean, period=atr_length)
+    pivots = find_confirmed_pivots(clean, length=pivot_length)
 
-    pivots = find_confirmed_pivots(
-        frame,
-        pivot_length
-    )
+    if pivots.empty:
+        return pd.DataFrame(columns=OUTPUT_COLUMNS)
 
-    for pivot in pivots:
+    # Group pivots by confirmation bar, preserving deterministic order.
+    pivots_by_position = {}
+    for pivot in pivots.to_dict("records"):
+        pivots_by_position.setdefault(int(pivot["Position"]), []).append(pivot)
 
-        pivots_by_confirm.setdefault(
-            pivot["confirm_i"],
-            []
-        ).append(pivot)
+    active_zones = []
+    completed_zones = []
 
-    active: list[SRZone] = []
+    highs = clean["High"].to_numpy(dtype=float)
+    lows = clean["Low"].to_numpy(dtype=float)
+    closes = clean["Close"].to_numpy(dtype=float)
+    times = clean.index
 
-    # =====================================================
-    # CHRONOLOGICAL REPLAY
-    # =====================================================
+    for position in range(len(clean)):
+        high = highs[position]
+        low = lows[position]
+        close = closes[position]
+        current_time = times[position]
 
-    for i in range(len(frame)):
-
-        row = frame.iloc[i]
-
-        high = float(row["High"])
-        low = float(row["Low"])
-        close = float(row["Close"])
-
-        # -------------------------------------------------
-        # A. PROCESS EXISTING ZONES ONLY
-        # -------------------------------------------------
-
+        # First update zones that were already known before this candle.
         survivors = []
+        for zone in active_zones:
+            side = zone["Side"]
 
-        for zone in active:
-
-            if zone.side == "Resistance":
-
-                if invalid_mode == "Wick":
-                    invalid = high > zone.high
-                else:
-                    invalid = close > zone.high
-
-                inside = (
-                    high >= zone.low
-                    and low <= zone.high
+            # Invalidation is evaluated before touch/rejection counting.
+            if invalid_mode == "Close":
+                invalid = (
+                    close < zone["Zone Low"]
+                    if side == "SUPPORT"
+                    else close > zone["Zone High"]
                 )
-
-                rejected = close < zone.low
-
-                left_zone = high < zone.low
-
             else:
-
-                if invalid_mode == "Wick":
-                    invalid = low < zone.low
-                else:
-                    invalid = close < zone.low
-
-                inside = (
-                    high >= zone.low
-                    and low <= zone.high
+                invalid = (
+                    low < zone["Zone Low"]
+                    if side == "SUPPORT"
+                    else high > zone["Zone High"]
                 )
 
-                rejected = close > zone.high
-
-                left_zone = low > zone.high
-
-            # Remove invalidated zones.
             if invalid:
+                zone["Invalidated Time"] = current_time
                 continue
 
-            # Sequential visit state machine.
-            if zone.state == 0 and inside:
+            intersects = high >= zone["Zone Low"] and low <= zone["Zone High"]
 
-                zone.state = 1
+            # 0 = waiting for first visit
+            # 1 = visited, waiting for price to leave
+            # 2 = left after a visit, waiting for a later revisit
+            if intersects:
+                favorable_close = (
+                    close >= zone["Midline"]
+                    if side == "SUPPORT"
+                    else close <= zone["Midline"]
+                )
 
-            elif zone.state == 1 and left_zone:
+                if zone["_visit_state"] == 2 and favorable_close:
+                    zone["Rejections"] += 1
+                    zone["_visit_state"] = 1
+                elif zone["_visit_state"] == 0:
+                    zone["_visit_state"] = 1
+                elif zone["_visit_state"] == 2:
+                    # A revisit that does not close favorably is not counted.
+                    zone["_visit_state"] = 1
+            elif zone["_visit_state"] == 1:
+                zone["_visit_state"] = 2
 
-                zone.state = 2
-
-            elif (
-                zone.state == 2
-                and inside
-                and rejected
-            ):
-
-                zone.rejections += 1
-                zone.state = 1
-
+            zone["Strength"] = min(int(zone["Rejections"]), strength)
+            zone["Strong"] = int(zone["Rejections"]) >= strength
             survivors.append(zone)
 
-        active = survivors
+        active_zones = survivors
 
-        # -------------------------------------------------
-        # B. CREATE NEWLY CONFIRMED ZONES
-        # -------------------------------------------------
-        #
-        # This happens AFTER existing-zone processing.
-        # Therefore, a new zone cannot be touched,
-        # rejected or invalidated on its creation candle.
-        #
-        # Its first eligible processing candle is i + 1.
-        # -------------------------------------------------
-
-        for pivot in pivots_by_confirm.get(i, []):
-
-            pivot_i = pivot["pivot_i"]
-
-            width = atr.iloc[pivot_i]
-
-            if pd.isna(width) or width <= 0:
-                continue
-
-            price = float(pivot["price"])
-            width = float(width)
-
-            if pivot["side"] == "Resistance":
-
-                top = price
-                bottom = price - width
-
-            else:
-
-                bottom = price
-                top = price + width
-
-            new_zone = SRZone(
-                side=pivot["side"],
-                low=bottom,
-                high=top,
-                pivot_time=frame.index[pivot_i],
-                confirmed_time=frame.index[i]
+        # Add pivots only after existing zones have processed this candle.
+        # This prevents a newly confirmed zone reacting to its own
+        # confirmation candle.
+        for pivot in pivots_by_position.get(position, []):
+            side = pivot["Type"]
+            zone_low, zone_high = _zone_bounds(
+                side=side,
+                pivot_price=float(pivot["Price"]),
+                atr_at_pivot=float(pivot["ATR"]),
+                zone_atr=float(zone_atr),
             )
 
-            active.append(new_zone)
+            if not np.isfinite(zone_low) or not np.isfinite(zone_high):
+                continue
+            if zone_high <= zone_low:
+                # If ATR is unavailable/zero, use a zero-width pivot level.
+                zone_low = float(pivot["Price"])
+                zone_high = float(pivot["Price"])
 
-            # Keep the most recent zones.
-            while len(active) > max_zones:
-                active.pop(0)
+            midline = (zone_low + zone_high) / 2.0
 
-    # =====================================================
-    # 6. BUILD OUTPUT
-    # =====================================================
+            # Avoid adding nearly identical same-side zones.
+            duplicate = False
+            for existing in active_zones:
+                if existing["Side"] != side:
+                    continue
+                overlap = (
+                    min(existing["Zone High"], zone_high)
+                    - max(existing["Zone Low"], zone_low)
+                )
+                smaller_width = min(
+                    max(existing["Zone High"] - existing["Zone Low"], 1e-12),
+                    max(zone_high - zone_low, 1e-12),
+                )
+                if overlap > 0 and overlap / smaller_width >= 0.70:
+                    duplicate = True
+                    break
 
-    result = []
+            if duplicate:
+                continue
 
-    for zone in active:
+            zone = {
+                "Side": side,
+                "Zone Low": float(zone_low),
+                "Zone High": float(zone_high),
+                "Confirmed Time": pivot["Confirmed Time"],
+                "Pivot Time": pivot["Pivot Time"],
+                "Rejections": 0,
+                "Strength": 0,
+                "Midline": float(midline),
+                "Strong": False,
+                "_visit_state": 0,
+            }
+            active_zones.append(zone)
 
-        capped_strength = min(
-            zone.rejections,
-            strength
-        )
+    # Return active zones only. Expired/invalidated zones are intentionally
+    # excluded from the current chart/table.
+    active_zones.sort(
+        key=lambda item: item["Confirmed Time"],
+        reverse=True,
+    )
+    output = []
+    for zone in active_zones[:max_zones]:
+        output.append({column: zone[column] for column in OUTPUT_COLUMNS})
 
-        result.append({
-
-            "Side": zone.side,
-
-            "Zone Low": zone.low,
-
-            "Zone High": zone.high,
-
-            "Confirmed Time": zone.confirmed_time,
-
-            "Pivot Time": zone.pivot_time,
-
-            "Rejections": zone.rejections,
-
-            "Strength": capped_strength,
-
-            "Midline": (
-                zone.low + zone.high
-            ) / 2.0,
-
-            "Strong": (
-                zone.rejections >= strength
-            ),
-
-        })
-
-    columns = [
-        "Side",
-        "Zone Low",
-        "Zone High",
-        "Confirmed Time",
-        "Pivot Time",
-        "Rejections",
-        "Strength",
-        "Midline",
-        "Strong"
-    ]
-
-    if not result:
-        return pd.DataFrame(columns=columns)
-
-    output = pd.DataFrame(result)
-
-    return output.sort_values(
-        "Confirmed Time",
-        ascending=False
-    ).reset_index(drop=True)
+    return pd.DataFrame(output, columns=OUTPUT_COLUMNS)
 
 
-# =========================================================
-# END OF DESTINY AI S/R ENGINE
-# =========================================================
+def get_sr_summary(zones: Optional[pd.DataFrame]) -> dict:
+    """Small diagnostic summary for the app's S/R status panel."""
+    if zones is None or not isinstance(zones, pd.DataFrame) or zones.empty:
+        return {
+            "total": 0,
+            "support": 0,
+            "resistance": 0,
+            "strong": 0,
+        }
+
+    return {
+        "total": int(len(zones)),
+        "support": int((zones["Side"] == "SUPPORT").sum()),
+        "resistance": int((zones["Side"] == "RESISTANCE").sum()),
+        "strong": int(zones["Strong"].fillna(False).astype(bool).sum()),
+    }
