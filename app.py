@@ -1,4 +1,4 @@
-from __future__ import annotations
+Drfrom __future__ import annotations
 
 from datetime import datetime, timezone
 import urllib.request
@@ -547,3 +547,519 @@ def align_timestamp(value, reference):
         )
 
     return timestamp
+# =========================================================
+# SUPPORT AND RESISTANCE CHART DISPLAY
+# =========================================================
+
+def draw_sr_zones(
+    fig,
+    zones,
+    data,
+    start_time,
+    end_time,
+):
+
+    required = [
+        "Side",
+        "Zone Low",
+        "Zone High",
+    ]
+
+    if (
+        not isinstance(zones, pd.DataFrame)
+        or zones.empty
+        or not all(
+            column in zones.columns
+            for column in required
+        )
+    ):
+        return
+
+    try:
+        latest_close = float(
+            data["Close"].iloc[-1]
+        )
+    except Exception:
+        return
+
+    parsed = []
+
+    for _, zone in zones.iterrows():
+
+        try:
+            side = str(
+                zone["Side"]
+            ).upper()
+
+            low = float(
+                zone["Zone Low"]
+            )
+
+            high = float(
+                zone["Zone High"]
+            )
+
+            source_tf = str(
+                zone.get(
+                    "Source Timeframe",
+                    "S/R"
+                )
+            )
+
+            classification = str(
+                zone.get(
+                    "Classification",
+                    "UNCLASSIFIED"
+                )
+            )
+
+            if (
+                side not in (
+                    "SUPPORT",
+                    "RESISTANCE"
+                )
+                or pd.isna(low)
+                or pd.isna(high)
+                or low >= high
+            ):
+                continue
+
+            distance = abs(
+                (low + high) / 2
+                - latest_close
+            )
+
+            parsed.append(
+                (
+                    distance,
+                    zone,
+                    side,
+                    low,
+                    high,
+                    source_tf,
+                    classification,
+                )
+            )
+
+        except Exception:
+            continue
+
+    if not parsed:
+        return
+
+    # Keep up to three nearest zones
+    # from each S/R timeframe.
+
+    by_layer = {}
+
+    for item in sorted(
+        parsed,
+        key=lambda row: row[0]
+    ):
+
+        by_layer.setdefault(
+            item[5],
+            []
+        )
+
+        if len(by_layer[item[5]]) < 3:
+            by_layer[item[5]].append(item)
+
+    selected = [
+        item
+        for layer_items in by_layer.values()
+        for item in layer_items
+    ]
+
+    selected.sort(
+        key=lambda row: row[0]
+    )
+
+    label_offset = 0
+
+    for (
+        _,
+        zone,
+        side,
+        low,
+        high,
+        source_tf,
+        classification,
+    ) in selected:
+
+        try:
+
+            zone_time = zone.get(
+                "Confirmed Time",
+                zone.get(
+                    "Pivot Time",
+                    data.index[0]
+                )
+            )
+
+            if pd.isna(zone_time):
+                zone_time = data.index[0]
+
+            zone_start = max(
+                align_timestamp(
+                    zone_time,
+                    start_time
+                ),
+                start_time,
+            )
+
+            if zone_start > end_time:
+                continue
+
+            color = (
+                "#00C087"
+                if side == "SUPPORT"
+                else "#F04452"
+            )
+
+            dash = {
+                "4H": "solid",
+                "1H": "dash",
+                "15M": "dot",
+            }.get(
+                source_tf,
+                "solid"
+            )
+
+            alpha = {
+                "4H": 0.105,
+                "1H": 0.075,
+                "15M": 0.045,
+            }.get(
+                source_tf,
+                0.06
+            )
+
+            if side == "SUPPORT":
+
+                fill = (
+                    f"rgba(0,192,135,{alpha})"
+                )
+
+            else:
+
+                fill = (
+                    f"rgba(240,68,82,{alpha})"
+                )
+
+            midpoint = (
+                low + high
+            ) / 2
+
+            fig.add_shape(
+                type="rect",
+                x0=zone_start,
+                x1=end_time,
+                y0=low,
+                y1=high,
+                fillcolor=fill,
+                line=dict(
+                    color=color,
+                    width=(
+                        1.25
+                        if source_tf == "4H"
+                        else 1
+                    ),
+                    dash=dash,
+                ),
+                layer="below",
+            )
+
+            fig.add_shape(
+                type="line",
+                x0=zone_start,
+                x1=end_time,
+                y0=midpoint,
+                y1=midpoint,
+                line=dict(
+                    color=color,
+                    width=0.8,
+                    dash=dash,
+                ),
+                layer="below",
+            )
+
+            fig.add_annotation(
+                x=end_time,
+                y=midpoint,
+                text=(
+                    f"{source_tf} "
+                    f"{classification} · {side}"
+                ),
+                showarrow=False,
+                xanchor="right",
+                yanchor="middle",
+                yshift=(
+                    label_offset % 3 - 1
+                ) * 12,
+                font=dict(
+                    size=8,
+                    color=color
+                ),
+                bgcolor="rgba(11,14,17,0.82)",
+                borderpad=2,
+            )
+
+            label_offset += 1
+
+        except Exception:
+            continue
+
+
+# =========================================================
+# ORDER BLOCK + FVG OVERLAP DISPLAY
+# =========================================================
+
+def draw_ob_fvg_overlaps(
+    fig,
+    setups,
+    data,
+    start_time,
+    end_time,
+):
+
+    required = [
+        "ob_time",
+        "ob_low",
+        "ob_high",
+        "fvg_time",
+        "fvg_low",
+        "fvg_high",
+        "direction",
+    ]
+
+    if (
+        not isinstance(setups, pd.DataFrame)
+        or setups.empty
+        or not all(
+            column in setups.columns
+            for column in required
+        )
+    ):
+        return 0
+
+    drawn = 0
+    active_label_count = 0
+
+    for _, setup in setups.tail(100).iterrows():
+
+        if drawn >= 5:
+            break
+
+        try:
+
+            ob_time = setup["ob_time"]
+            fvg_time = setup["fvg_time"]
+
+            if (
+                pd.isna(ob_time)
+                or pd.isna(fvg_time)
+            ):
+                continue
+
+            overlap_time = max(
+                align_timestamp(
+                    ob_time,
+                    start_time
+                ),
+                align_timestamp(
+                    fvg_time,
+                    start_time
+                ),
+            )
+
+            if overlap_time > end_time:
+                continue
+
+            ob_low = float(
+                setup["ob_low"]
+            )
+
+            ob_high = float(
+                setup["ob_high"]
+            )
+
+            fvg_low = float(
+                setup["fvg_low"]
+            )
+
+            fvg_high = float(
+                setup["fvg_high"]
+            )
+
+            # Calculate shared price area.
+
+            low = max(
+                ob_low,
+                fvg_low
+            )
+
+            high = min(
+                ob_high,
+                fvg_high
+            )
+
+            if low >= high:
+                continue
+
+            direction = str(
+                setup["direction"]
+            ).upper()
+
+            if direction == "BULLISH":
+
+                color = "#00C087"
+
+                invalid_mask = (
+                    (data.index >= overlap_time)
+                    & (
+                        data["Close"]
+                        < max(
+                            ob_low,
+                            fvg_low
+                        )
+                    )
+                )
+
+            elif direction == "BEARISH":
+
+                color = "#F04452"
+
+                invalid_mask = (
+                    (data.index >= overlap_time)
+                    & (
+                        data["Close"]
+                        > min(
+                            ob_high,
+                            fvg_high
+                        )
+                    )
+                )
+
+            else:
+                continue
+
+            invalid_rows = data.loc[
+                invalid_mask
+            ]
+
+            setup_end = end_time
+
+            invalidated = (
+                not invalid_rows.empty
+            )
+
+            if invalidated:
+
+                invalid_time = align_timestamp(
+                    invalid_rows.index[0],
+                    start_time
+                )
+
+                if invalid_time < start_time:
+                    continue
+
+                setup_end = min(
+                    invalid_time,
+                    end_time
+                )
+
+            elif (
+                str(
+                    setup.get(
+                        "status",
+                        "ACTIVE"
+                    )
+                ).upper()
+                == "INVALIDATED"
+            ):
+                continue
+
+            visible_start = max(
+                overlap_time,
+                start_time
+            )
+
+            if visible_start > setup_end:
+                continue
+
+            if direction == "BEARISH":
+
+                fill = (
+                    "rgba(240,68,82,0.035)"
+                    if invalidated
+                    else "rgba(240,68,82,0.12)"
+                )
+
+            else:
+
+                fill = (
+                    "rgba(0,192,135,0.035)"
+                    if invalidated
+                    else "rgba(0,192,135,0.12)"
+                )
+
+            fig.add_shape(
+                type="rect",
+                x0=visible_start,
+                x1=setup_end,
+                y0=low,
+                y1=high,
+                fillcolor=fill,
+                line=dict(
+                    color=color,
+                    width=(
+                        0.7
+                        if invalidated
+                        else 1
+                    ),
+                    dash=(
+                        "dot"
+                        if invalidated
+                        else "solid"
+                    ),
+                ),
+                layer="below",
+            )
+
+            if (
+                not invalidated
+                and active_label_count < 2
+            ):
+
+                label = (
+                    "BULL OB/FVG"
+                    if direction == "BULLISH"
+                    else "BEAR OB/FVG"
+                )
+
+                fig.add_annotation(
+                    x=end_time,
+                    y=(low + high) / 2,
+                    text=label,
+                    showarrow=False,
+                    xanchor="right",
+                    yanchor="middle",
+                    yshift=(
+                        active_label_count * 12
+                    ),
+                    font=dict(
+                        size=8,
+                        color=color
+                    ),
+                    bgcolor="rgba(11,14,17,0.82)",
+                )
+
+                active_label_count += 1
+
+            drawn += 1
+
+        except Exception:
+            continue
+
+    return drawn
