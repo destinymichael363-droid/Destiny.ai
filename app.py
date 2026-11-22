@@ -360,30 +360,20 @@ def run_all_analyses(frames):
 
     for timeframe in TIMEFRAMES:
 
-        data = frames.get(
-            timeframe,
-            pd.DataFrame()
-        )
+        data = frames.get(timeframe, pd.DataFrame())
 
         if data is None or data.empty:
-
             results[timeframe] = {
                 "status": "UNAVAILABLE",
                 "error": "Historical data unavailable.",
             }
-
             continue
 
         try:
-
-            output = analyze_market(
-                data.tail(1200).copy()
-            )
+            output = analyze_market(data.tail(1200).copy())
 
             if not isinstance(output, dict):
-                raise TypeError(
-                    "Analysis engine returned an unexpected result type."
-                )
+                raise TypeError("Analysis returned an unexpected result.")
 
             results[timeframe] = {
                 "status": "ANALYSED",
@@ -392,7 +382,6 @@ def run_all_analyses(frames):
             }
 
         except Exception as exc:
-
             results[timeframe] = {
                 "status": "ERROR",
                 "error": str(exc),
