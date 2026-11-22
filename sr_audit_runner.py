@@ -28,6 +28,7 @@ audit_files = [
     "sr_audit.py",
     "sr_replay_audit.py",
     "sr_prefix_audit.py",
+    "sr_stress_audit.py",
 ]
 
 for filename in audit_files:
@@ -83,8 +84,12 @@ if st.button("Run Historical Replay Audit"):
     run_audit("sr_replay_audit")
 
 
+if st.button("Run Historical Prefix Integrity Audit"):
+    run_audit("sr_prefix_audit")
+
+
 if st.button(
-    "Run Historical Prefix Integrity Audit",
+    "Run Historical Replay Stress Test",
     type="primary"
 ):
-    run_audit("sr_prefix_audit")
+    run_audit("sr_stress_audit")
