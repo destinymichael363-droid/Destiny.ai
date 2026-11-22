@@ -1781,7 +1781,7 @@ st.divider()
 st.header("Multi-Timeframe Context")
 
 try:
-    mtf_result = build_mtf_context(frames)
+    mtf_result = build_mtf_context(analyses)
 
     if isinstance(mtf_result, pd.DataFrame):
         if not mtf_result.empty:
