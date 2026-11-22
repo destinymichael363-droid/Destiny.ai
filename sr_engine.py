@@ -122,10 +122,108 @@ def analyze_sr(
         pivots_by_confirm.setdefault(pivot["confirm_i"], []).append(pivot)
 
 
-    active: list[SRZone] = []
+    
+    active = []
+
     for i in range(len(frame)):
         row = frame.iloc[i]
-        high, low, close = float(row["High"]), float(row["Low"]), float(row["Close"])
+
+        high = float(row["High"])
+        low = float(row["Low"])
+        close = float(row["Close"])
+
+        # Track zones created on this candle.
+        # They must not be processed until the next candle.
+        new_zone_ids = set()
+
+        # Create zones only when their pivots are confirmed.
+        for p in pivots_by_confirm.get(i, []):
+
+            width = atr.iloc[p["pivot_i"]]
+
+            if pd.isna(width) or width <= 0:
+                continue
+
+            if p["side"] == "Resistance":
+                top = p["price"]
+                bottom = p["price"] - width
+            else:
+                bottom = p["price"]
+                top = p["price"] + width
+
+            new_zone = SRZone(
+                side=p["side"],
+                low=bottom,
+                high=top,
+                pivot_time=frame.index[p["pivot_i"]],
+                confirmed_time=frame.index[i],
+            )
+
+            active.append(new_zone)
+            new_zone_ids.add(id(new_zone))
+
+            while len(active) > max_zones:
+                active.pop(0)
+
+        survivors = []
+
+        for zone in active:
+
+            # Important correction:
+            # Do not process a zone on its creation candle.
+            if id(zone) in new_zone_ids:
+                survivors.append(zone)
+                continue
+
+            if zone.side == "Resistance":
+
+                invalid = (
+                    high > zone.high
+                    if invalid_mode == "Wick"
+                    else close > zone.high
+                )
+
+                inside = (
+                    high >= zone.low
+                    and low <= zone.high
+                )
+
+                rejected = close < zone.low
+                left_zone = high < zone.low
+
+            else:
+
+                invalid = (
+                    low < zone.low
+                    if invalid_mode == "Wick"
+                    else close < zone.low
+                )
+
+                inside = (
+                    high >= zone.low
+                    and low <= zone.high
+                )
+
+                rejected = close > zone.high
+                left_zone = low > zone.high
+
+            if invalid:
+                continue
+
+            if zone.state == 0 and inside:
+                zone.state = 1
+
+            elif zone.state == 1 and left_zone:
+                zone.state = 2
+
+            elif zone.state == 2 and inside and rejected:
+                zone.rejections += 1
+                zone.state = 1
+
+            survivors.append(zone)
+
+        active = survivors
+
 
 
         # Create zones only when the pivot is confirmed; zone width uses ATR at pivot.
