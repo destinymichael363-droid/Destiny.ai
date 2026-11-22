@@ -24,9 +24,18 @@ st.subheader("Deployment diagnostics")
 
 st.write("App folder:", ROOT)
 
-replay_path = os.path.join(ROOT, "sr_replay_audit.py")
+audit_files = [
+    "sr_audit.py",
+    "sr_replay_audit.py",
+    "sr_prefix_audit.py",
+]
 
-st.write("Replay file exists:", os.path.isfile(replay_path))
+for filename in audit_files:
+    path = os.path.join(ROOT, filename)
+    st.write(
+        f"{filename} exists:",
+        os.path.isfile(path)
+    )
 
 python_files = sorted(
     f for f in os.listdir(ROOT)
@@ -70,5 +79,12 @@ if st.button("Run Historical Integrity Audit"):
     run_audit("sr_audit")
 
 
-if st.button("Run Historical Replay Audit", type="primary"):
+if st.button("Run Historical Replay Audit"):
     run_audit("sr_replay_audit")
+
+
+if st.button(
+    "Run Historical Prefix Integrity Audit",
+    type="primary"
+):
+    run_audit("sr_prefix_audit")
