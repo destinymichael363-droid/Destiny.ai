@@ -2,7 +2,8 @@ from __future__ import annotations
 from setup_bridge import register_setups
 from datetime import datetime, timezone
 import urllib.request
-
+from auth import get_authenticated_supabase
+from paper_engine import load_account
 import pandas as pd
 import yfinance as yf
 import plotly.graph_objects as go
