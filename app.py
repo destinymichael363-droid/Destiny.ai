@@ -348,6 +348,7 @@ def load_all_timeframes(symbol):
         "5M": five,
         "1M": one,
 }
+
 # =========================================================
 # HISTORICAL ANALYSIS ENGINES
 # =========================================================
@@ -383,6 +384,22 @@ def run_all_analyses(frames):
                 raise TypeError(
                     "Analysis engine returned an unexpected result type."
                 )
+
+            results[timeframe] = {
+                "status": "ANALYSED",
+                "data": output,
+                "error": None,
+            }
+
+        except Exception as exc:
+
+            results[timeframe] = {
+                "status": "ERROR",
+                "error": str(exc),
+            }
+
+    return results
+
 
 # =========================================================
 # HISTORICAL ENGINE DATA — TABLE DISPLAY
