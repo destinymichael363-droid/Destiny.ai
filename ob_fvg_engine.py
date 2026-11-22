@@ -100,8 +100,8 @@ def run_ob_fvg_engine(
     min_tick: float = 0.0,
 ) -> dict:
     """
-    Translates 'Destiny OB + FVG Trend Edition' bar-by-bar without lookahead.
-    Expects DataFrame with Open, High, Low, Close (and Volume if use_volume_filter=True).
+    Translates 'Destiny OB + FVG Trend Edition' bar-by-bar without lookahead,
+    recording `bos_level` and `bos_bar` whenever a confirmed BOS occurs.
     """
     required = ["Open", "High", "Low", "Close"]
     if df is None or df.empty or not all(col in df.columns for col in required):
@@ -125,7 +125,6 @@ def run_ob_fvg_engine(
     swing_high_piv = _pivots_confirmed(data["High"], pivot_length, pivot_length).to_numpy(dtype=float)
     swing_low_piv = _pivots_confirmed(data["Low"], pivot_length, pivot_length).to_numpy(dtype=float)
 
-    # Precompute dynamic dominant trend pivots per bar (matches variable dominantSwingLength in Pine)
     trend_atr_series = _atr(data, 14)
     avg_trend_atr_series = _sma(trend_atr_series, volatility_lookback)
     trend_atr_vals = trend_atr_series.to_numpy(dtype=float)
@@ -159,7 +158,6 @@ def run_ob_fvg_engine(
                 if np.all(c_l < lows[p - dom_len : p]) and np.all(c_l <= lows[p + 1 : t + 1]):
                     dyn_low_piv[t] = c_l
 
-    # State variables
     last_swing_high = np.nan
     last_swing_low = np.nan
     last_swing_high_bar: int | None = None
@@ -309,7 +307,7 @@ def run_ob_fvg_engine(
                 liq_levels.pop(idx)
                 swept_count += 1
 
-        # 6. BOS detection (crossover / crossunder of close)
+        # 6. BOS detection (crossover / crossunder of close) + BOS price/bar tracking
         crossed_above = (
             i > 0
             and not np.isnan(last_swing_high)
@@ -328,10 +326,16 @@ def run_ob_fvg_engine(
         bull_bos = (not last_swing_high_broken) and (not np.isnan(last_swing_high)) and crossed_above
         bear_bos = (not last_swing_low_broken) and (not np.isnan(last_swing_low)) and crossed_below
 
+        bos_level = np.nan
+        bos_bar = -1
         if bull_bos:
             last_swing_high_broken = True
+            bos_level = float(last_swing_high)
+            bos_bar = int(last_swing_high_bar) if last_swing_high_bar is not None else i
         if bear_bos:
             last_swing_low_broken = True
+            bos_level = float(last_swing_low)
+            bos_bar = int(last_swing_low_bar) if last_swing_low_bar is not None else i
 
         new_bull_setup = False
         new_bear_setup = False
@@ -545,6 +549,8 @@ def run_ob_fvg_engine(
                 "trend_direction": trend_dir,
                 "bull_bos": bull_bos,
                 "bear_bos": bear_bos,
+                "bos_level": bos_level,
+                "bos_bar": bos_bar,
                 "new_bull_setup": new_bull_setup,
                 "new_bear_setup": new_bear_setup,
                 "swept_liquidity_count": swept_count,
@@ -559,4 +565,3 @@ def run_ob_fvg_engine(
         "active_liquidity": liq_levels,
         "signals_df": pd.DataFrame(records).set_index("timestamp"),
     }
-
