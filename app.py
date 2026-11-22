@@ -26,7 +26,22 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 require_login()
+supabase = get_authenticated_supabase()
 
+if supabase is None:
+    st.warning("Please log in again.")
+    st.stop()
+
+user_id = st.session_state["supabase_user"]
+
+try:
+    account = load_account(supabase, user_id)
+    st.metric(
+        "Virtual Practice Balance",
+        f"{account['balance']:,.2f}"
+    )
+except Exception as e:
+    st.error(f"Could not load virtual account: {e}")
 
 TIMEFRAMES = ["1D", "4H", "1H", "15M", "5M", "1M"]
 SR_TIMEFRAMES = ["4H", "1H", "15M"]
