@@ -394,35 +394,6 @@ def run_all_analyses(frames):
 # HISTORICAL ENGINE DATA — TABLE DISPLAY
 # =========================================================
 
-st.divider()
-st.header("Historical Engine Records")
-
-stats = result_data.get("statistics", {})
-
-if stats:
-    st.subheader("Historical Statistics")
-
-    stat_col1, stat_col2, stat_col3, stat_col4 = st.columns(4)
-
-    stat_col1.metric(
-        "Bullish BOS History",
-        stats.get("bullish_bos", 0)
-    )
-
-    stat_col2.metric(
-        "Bearish BOS History",
-        stats.get("bearish_bos", 0)
-    )
-
-    stat_col3.metric(
-        "Historical OB/FVG Records",
-        stats.get("returned_historical_setups", 0)
-    )
-
-    stat_col4.metric(
-        "Invalidated Historical Records",
-        stats.get("invalidated_setups", 0)
-    )
 
 # ---------------------------------------------------------
 # HISTORICAL BOS RECORDS
