@@ -348,3 +348,202 @@ def load_all_timeframes(symbol):
         "5M": five,
         "1M": one,
 }
+# =========================================================
+# HISTORICAL ANALYSIS ENGINES
+# =========================================================
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def run_all_analyses(frames):
+
+    results = {}
+
+    for timeframe in TIMEFRAMES:
+
+        data = frames.get(
+            timeframe,
+            pd.DataFrame()
+        )
+
+        if data is None or data.empty:
+
+            results[timeframe] = {
+                "status": "UNAVAILABLE",
+                "error": "Historical data unavailable.",
+            }
+
+            continue
+
+        try:
+
+            output = analyze_market(
+                data.tail(1200).copy()
+            )
+
+            if not isinstance(output, dict):
+                raise TypeError(
+                    "Analysis engine returned an unexpected result type."
+                )
+
+            results[timeframe] = {
+                "status": "ANALYSED",
+                "data": output,
+                "error": None,
+            }
+
+        except Exception as exc:
+
+            results[timeframe] = {
+                "status": "ERROR",
+                "error": str(exc),
+            }
+
+    return results
+
+
+# =========================================================
+# SUPPORT AND RESISTANCE ANALYSIS
+# =========================================================
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def run_sr_analysis(data, source_timeframe):
+
+    if data is None or data.empty:
+        return pd.DataFrame()
+
+    clean = data.copy().sort_index()
+
+    clean = clean[
+        ~clean.index.duplicated(keep="last")
+    ]
+
+    required = [
+        "High",
+        "Low",
+        "Close",
+    ]
+
+    if not all(
+        column in clean.columns
+        for column in required
+    ):
+
+        raise ValueError(
+            f"{source_timeframe}: required OHLC columns are missing."
+        )
+
+    clean = clean.dropna(
+        subset=required
+    )
+
+    if len(clean) < 30:
+        return pd.DataFrame()
+
+    zones = analyze_sr(
+        data=clean,
+        pivot_length=8,
+        zone_atr=1.0,
+        atr_length=14,
+        strength=3,
+        invalid_mode="Close",
+        max_zones=40,
+    )
+
+    if not isinstance(zones, pd.DataFrame):
+
+        raise TypeError(
+            f"{source_timeframe}: S/R engine returned a non-DataFrame result."
+        )
+
+    if zones.empty:
+        return pd.DataFrame()
+
+    zones = zones.copy()
+
+    if "Confirmed Time" not in zones.columns:
+
+        raise ValueError(
+            f"{source_timeframe}: S/R output has no Confirmed Time column."
+        )
+
+    zones["Source Timeframe"] = source_timeframe
+
+    zones["Classification"] = (
+        SR_CLASSIFICATION.get(
+            source_timeframe,
+            "UNCLASSIFIED",
+        )
+    )
+
+    return (
+        zones.sort_values(
+            "Confirmed Time",
+            ascending=False
+        )
+        .head(8)
+        .reset_index(drop=True)
+    )
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def build_combined_sr(frames):
+
+    layers = []
+
+    for timeframe in SR_TIMEFRAMES:
+
+        source = frames.get(
+            timeframe,
+            pd.DataFrame()
+        )
+
+        layer = run_sr_analysis(
+            source,
+            timeframe
+        )
+
+        if (
+            isinstance(layer, pd.DataFrame)
+            and not layer.empty
+        ):
+
+            layers.append(layer)
+
+    if layers:
+
+        return pd.concat(
+            layers,
+            ignore_index=True
+        )
+
+    return pd.DataFrame()
+
+
+# =========================================================
+# TIME ALIGNMENT HELPER
+# =========================================================
+
+def align_timestamp(value, reference):
+
+    timestamp = pd.Timestamp(value)
+
+    reference_timestamp = pd.Timestamp(
+        reference
+    )
+
+    if (
+        reference_timestamp.tzinfo is None
+        and timestamp.tzinfo is not None
+    ):
+
+        timestamp = timestamp.tz_localize(None)
+
+    elif (
+        reference_timestamp.tzinfo is not None
+        and timestamp.tzinfo is None
+    ):
+
+        timestamp = timestamp.tz_localize(
+            reference_timestamp.tzinfo
+        )
+
+    return timestamp
