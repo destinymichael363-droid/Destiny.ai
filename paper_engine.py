@@ -236,66 +236,17 @@ def load_account(supabase, user_id):
 def record_closed_trade(supabase, user_id, trade):
 
     if not trade.get("simulation_only"):
-        raise ValueError("Only virtual trades are accepted.")
-
-    account = load_account(supabase, user_id)
-
-    trade_id = trade["trade_id"]
-
-    # Duplicate protection
-    for existing in account["transactions"]:
-
-        if (
-            existing.get("Event") == "Virtual trade closed"
-            and existing.get("Trade ID") == trade_id
-        ):
-            return {
-                "saved": False,
-                "duplicate": True,
-                "balance": account["balance"],
-            }
-
-    pnl = float(trade["virtual_pnl"])
-
-    new_balance = account["balance"] + pnl
-
-    history_item = {
-        "Time (UTC)": utc_now(),
-        "Type": "Virtual trade closed",
-        "Event": "Virtual trade closed",
-        "Trade ID": trade_id,
-        "Symbol": trade["symbol"],
-        "Timeframe": trade["timeframe"],
-        "Direction": trade["direction"],
-        "Entry": trade["entry"],
-        "Exit": trade["exit_price"],
-        "Outcome": trade["outcome"],
-        "Result (R)": trade["result_r"],
-        "Amount": pnl,
-        "Virtual balance": new_balance,
-        "Simulation only": True,
-    }
-
-    updated_history = [history_item] + account["transactions"]
+        raise ValueError("Only virtual transactions are accepted.")
 
     result = (
-        supabase.table("paper_account")
-        .update({
-            "balance": new_balance,
-            "transactions": updated_history,
-            "updated_at": utc_now(),
-        })
-        .eq("user_id", user_id)
-        .execute()
+        supabase.rpc(
+            "record_virtual_trade",
+            {"p_trade": trade}
+        ).execute()
     )
 
     if not result.data:
-        raise RuntimeError("Virtual account update was not confirmed.")
+        raise RuntimeError("Virtual transaction was not confirmed.")
 
-    return {
-        "saved": True,
-        "duplicate": False,
-        "balance": new_balance,
-        "virtual_pnl": pnl,
-    }
+    return result.data
 
