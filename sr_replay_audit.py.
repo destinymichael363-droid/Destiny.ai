@@ -1,152 +1,57 @@
 
-import pandas as pd
-import numpy as np
+import streamlit as st
+import io
+import contextlib
+import importlib
+import traceback
+import sys
+import os
 
-from sr_engine import analyze_sr, find_confirmed_pivots
+ROOT = os.path.dirname(os.path.abspath(__file__))
 
+if ROOT not in sys.path:
+    sys.path.insert(0, ROOT)
 
-def make_candles(rows=100):
-    """Create deterministic synthetic candles for replay diagnostics."""
-    rng = np.random.default_rng(42)
-    close = 100 + np.cumsum(rng.normal(0, 0.35, rows))
+st.set_page_config(
+    page_title="Destiny AI — S/R Audits",
+    layout="wide"
+)
 
-    data = pd.DataFrame({
-        "Open": close - rng.normal(0, 0.15, rows),
-        "High": close + rng.uniform(0.1, 0.6, rows),
-        "Low": close - rng.uniform(0.1, 0.6, rows),
-        "Close": close,
-        "Volume": rng.integers(100, 1000, rows),
-    })
-
-    data.index = pd.date_range(
-        "2025-01-01", periods=rows, freq="h"
-    )
-    return data
+st.title("Destiny AI — S/R Audits")
+st.caption("Synthetic diagnostics only • No live-market signals")
 
 
-def run_replay(data):
-    """Recalculate S/R using only candles available at each replay step."""
-    snapshots = []
+def run_audit(module_name):
+    output = io.StringIO()
 
-    for end in range(20, len(data) + 1):
-        visible = data.iloc[:end].copy()
+    try:
+        importlib.invalidate_caches()
 
-        try:
-            zones = analyze_sr(visible)
-        except Exception as error:
-            return None, f"Engine error at candle {end}: {error}"
+        if module_name in sys.modules:
+            audit = importlib.reload(sys.modules[module_name])
+        else:
+            audit = importlib.import_module(module_name)
 
-        if not isinstance(zones, pd.DataFrame):
-            return None, f"Unexpected output at candle {end}"
+        with contextlib.redirect_stdout(output):
+            audit.main()
 
-        snapshots.append({
-            "candle": end - 1,
-            "time": visible.index[-1],
-            "zones": zones.copy(),
-        })
+        results = output.getvalue()
+        st.code(results, language="text")
 
-    return snapshots, None
+        if "[FAIL]" in results:
+            st.error("Audit found a failure. Review the output.")
+        else:
+            st.success("Audit completed. Review the results.")
 
-
-def check_no_future_confirmation(data, length=3):
-    pivots = find_confirmed_pivots(data.copy(), length)
-
-    if not isinstance(pivots, list):
-        return False, "Pivot function did not return a list"
-
-    for pivot in pivots:
-        pivot_i = pivot.get("pivot_i")
-
-        if not isinstance(pivot_i, (int, np.integer)):
-            return False, "Pivot has no valid pivot_i"
-
-        confirmation_i = pivot_i + length
-
-        if confirmation_i >= len(data):
-            return False, "Pivot confirmation index is outside the data"
-
-    return True, f"{len(pivots)} pivots have valid confirmation positions"
+    except Exception:
+        st.error("Audit could not run.")
+        st.code(traceback.format_exc())
+        st.code(output.getvalue(), language="text")
 
 
-def check_zone_visibility(snapshots):
-    for snapshot in snapshots:
-        zones = snapshot["zones"]
-
-        if zones.empty or "Confirmed Time" not in zones.columns:
-            continue
-
-        for confirmed_time in zones["Confirmed Time"].dropna():
-            if confirmed_time > snapshot["time"]:
-                return False, (
-                    f"Future zone found at replay candle "
-                    f"{snapshot['candle']}"
-                )
-
-    return True, "No zone has a confirmation time later than its snapshot"
+if st.button("Run Historical Integrity Audit"):
+    run_audit("sr_audit")
 
 
-def check_zone_bounds(snapshots):
-    for snapshot in snapshots:
-        zones = snapshot["zones"]
-
-        required = {"Zone Low", "Zone High"}
-        if not required.issubset(zones.columns):
-            return False, "Zone boundary columns are missing"
-
-        if zones.empty:
-            continue
-
-        invalid = zones["Zone Low"] > zones["Zone High"]
-
-        if invalid.any():
-            return False, (
-                f"Invalid zone boundaries at candle {snapshot['candle']}"
-            )
-
-    return True, "All replayed zone boundaries are correctly ordered"
-
-
-def main():
-    print("DESTINY AI — S/R REPLAY AUDIT")
-    print("Synthetic candles only. No live data or trade signals.\n")
-
-    data = make_candles()
-
-    print("[PASS] Synthetic replay candles created")
-
-    pivot_ok, pivot_message = check_no_future_confirmation(data)
-    print(
-        f"[{'PASS' if pivot_ok else 'FAIL'}] "
-        f"Pivot confirmation structure — {pivot_message}"
-    )
-
-    snapshots, error = run_replay(data)
-
-    if error:
-        print(f"[FAIL] Replay execution — {error}")
-        return
-
-    print(f"[PASS] Candle-by-candle replay completed — {len(snapshots)} snapshots")
-
-    visibility_ok, visibility_message = check_zone_visibility(snapshots)
-    print(
-        f"[{'PASS' if visibility_ok else 'FAIL'}] "
-        f"Zone visibility — {visibility_message}"
-    )
-
-    bounds_ok, bounds_message = check_zone_bounds(snapshots)
-    print(
-        f"[{'PASS' if bounds_ok else 'FAIL'}] "
-        f"Zone boundaries — {bounds_message}"
-    )
-
-    print("\nIMPORTANT")
-    print("These checks are preliminary replay diagnostics.")
-    print("They do not yet prove rejection-count timing,")
-    print("invalidation timing, or complete absence of look-ahead bias.")
-    print("\nS/R replay audit completed.")
-
-
-if __name__ == "__main__":
-    main()
-
+if st.button("Run Historical Replay Audit", type="primary"):
+    run_audit("sr_replay_audit")
