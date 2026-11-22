@@ -24,6 +24,13 @@ st.set_page_config(
 require_login()
 
 TIMEFRAMES = ["1D", "4H", "1H", "15M", "5M", "1M"]
+SR_TIMEFRAMES = ["4H", "1H", "15M"]
+
+SR_CLASSIFICATION = {
+    "4H": "MAJOR",
+    "1H": "MAJOR",
+    "15M": "MINOR"
+}
 
 MARKETS = {
     "Crypto": {
@@ -146,7 +153,8 @@ def load_all_timeframes(symbol):
     daily = fetch_market_data(symbol, "1d", "2y")
     if not daily.empty:
         today_utc = pd.Timestamp.now(tz="UTC").date()
-        if daily.index[-1].date() >= today_utc:
+        daily_last = pd.Timestamp(daily.index[-1])
+        if daily_last.date() >= today_utc:
             daily = daily.iloc[:-1].copy()
 
     hourly = remove_latest_candle(
@@ -207,16 +215,57 @@ def run_all_analyses(frames):
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
-def run_sr_analysis(data):
+def run_sr_analysis(data, source_timeframe):
+    """
+    Analyse each S/R source timeframe independently.
+    Only completed candles are supplied by load_all_timeframes().
+    Close invalidation is explicitly selected for every S/R layer.
+    """
     if data is None or data.empty:
         return pd.DataFrame()
+
     try:
-        zones = analyze_sr(data.tail(400).copy())
-        if isinstance(zones, pd.DataFrame):
-            return zones.head(8).copy()
+        clean = data.copy()
+        clean = clean.sort_index()
+        clean = clean[~clean.index.duplicated(keep="last")]
+
+        zones = analyze_sr(
+            clean.tail(400).copy(),
+            invalid_mode="Close"
+        )
+
+        if not isinstance(zones, pd.DataFrame) or zones.empty:
+            return pd.DataFrame()
+
+        zones = zones.copy()
+        zones["Source Timeframe"] = source_timeframe
+        zones["Classification"] = SR_CLASSIFICATION.get(
+            source_timeframe, "UNCLASSIFIED"
+        )
+        return zones.head(8).copy()
     except Exception:
-        pass
-    return pd.DataFrame()
+        return pd.DataFrame()
+
+
+def build_combined_sr(frames):
+    """
+    Always combines 4H major, 1H major and 15M minor S/R.
+    This is independent of the main chart timeframe.
+    """
+    layer_frames = []
+
+    for timeframe in SR_TIMEFRAMES:
+        source_data = frames.get(timeframe, pd.DataFrame())
+        layer = run_sr_analysis(source_data, timeframe)
+
+        if isinstance(layer, pd.DataFrame) and not layer.empty:
+            layer_frames.append(layer)
+
+    if not layer_frames:
+        return pd.DataFrame()
+
+    combined = pd.concat(layer_frames, ignore_index=True)
+    return combined
 
 
 # =========================================================
@@ -240,74 +289,145 @@ def draw_sr_zones(fig, zones, data, start_time, end_time):
     required = ["Side", "Zone Low", "Zone High"]
     if not isinstance(zones, pd.DataFrame) or zones.empty:
         return
-    if not all(c in zones.columns for c in required):
+    if not all(column in zones.columns for column in required):
         return
 
     latest_close = float(data["Close"].iloc[-1])
     valid_zones = []
-    for _, zone in zones.head(8).iterrows():
+
+    for _, zone in zones.iterrows():
         try:
             side = str(zone["Side"]).upper()
             low = float(zone["Zone Low"])
             high = float(zone["Zone High"])
-            if side not in {"SUPPORT", "RESISTANCE"} or pd.isna(low) or pd.isna(high) or low >= high:
+            source_tf = str(zone.get("Source Timeframe", "S/R"))
+            classification = str(
+                zone.get("Classification", "UNCLASSIFIED")
+            )
+
+            if (
+                side not in {"SUPPORT", "RESISTANCE"}
+                or pd.isna(low)
+                or pd.isna(high)
+                or low >= high
+            ):
                 continue
-            valid_zones.append((abs(((low + high) / 2) - latest_close), zone, side, low, high))
+
+            valid_zones.append((
+                abs(((low + high) / 2) - latest_close),
+                zone, side, low, high, source_tf, classification
+            ))
         except Exception:
             continue
 
-    # Draw all valid zones, but label only the three closest to current price.
-    label_keys = {id(item[1]) for item in sorted(valid_zones, key=lambda item: item[0])[:3]}
+    # Keep every valid layer visible; label only the three nearest zones.
+    nearest = sorted(valid_zones, key=lambda item: item[0])[:3]
+    label_keys = {
+        (
+            item[5],
+            item[2],
+            item[3],
+            item[4],
+            str(item[1].get("Confirmed Time", ""))
+        )
+        for item in nearest
+    }
+
     label_index = 0
-    for _, zone, side, low, high in valid_zones:
+
+    for _, zone, side, low, high, source_tf, classification in valid_zones:
         try:
-            zone_time = zone.get("Confirmed Time", zone.get("Pivot Time", data.index[0]))
+            zone_time = zone.get(
+                "Confirmed Time",
+                zone.get("Pivot Time", data.index[0])
+            )
             if pd.isna(zone_time):
                 zone_time = data.index[0]
-            zone_time = align_timestamp(zone_time, start_time)
-            after_confirmation = data[data.index >= zone_time]
-            if side == "SUPPORT":
-                broken = after_confirmation[after_confirmation["Close"] < low]
-                fill, color = "rgba(0,192,135,0.10)", "#00C087"
-            else:
-                broken = after_confirmation[after_confirmation["Close"] > high]
-                fill, color = "rgba(240,68,82,0.10)", "#F04452"
 
-            invalidated = not broken.empty
-            zone_end = end_time
-            if invalidated:
-                break_time = align_timestamp(broken.index[0], start_time)
-                if break_time < start_time:
-                    continue
-                zone_end = min(break_time, end_time)
+            zone_time = align_timestamp(zone_time, start_time)
             zone_start = max(zone_time, start_time)
+            zone_end = end_time
+
             if zone_start > zone_end:
                 continue
 
+            if side == "SUPPORT":
+                color = "#00C087"
+            else:
+                color = "#F04452"
+
+            # Different line styles distinguish source timeframes:
+            # 4H = solid, 1H = dashed, 15M = dotted.
+            if source_tf == "4H":
+                dash_style = "solid"
+                fill_alpha = "0.105"
+            elif source_tf == "1H":
+                dash_style = "dash"
+                fill_alpha = "0.075"
+            else:
+                dash_style = "dot"
+                fill_alpha = "0.045"
+
+            if side == "SUPPORT":
+                fill = f"rgba(0,192,135,{fill_alpha})"
+            else:
+                fill = f"rgba(240,68,82,{fill_alpha})"
+
             midpoint = (low + high) / 2
+
             fig.add_shape(
-                type="rect", x0=zone_start, x1=zone_end,
-                y0=low, y1=high, fillcolor=fill,
-                line=dict(color=color, width=0.8 if invalidated else 1.0,
-                          dash="dot" if invalidated else "solid"),
+                type="rect",
+                x0=zone_start,
+                x1=zone_end,
+                y0=low,
+                y1=high,
+                fillcolor=fill,
+                line=dict(
+                    color=color,
+                    width=1.2 if source_tf == "4H" else 0.9,
+                    dash=dash_style
+                ),
                 layer="below"
             )
+
             fig.add_shape(
-                type="line", x0=zone_start, x1=zone_end,
-                y0=midpoint, y1=midpoint,
-                line=dict(color=color, width=0.8, dash="dot"),
+                type="line",
+                x0=zone_start,
+                x1=zone_end,
+                y0=midpoint,
+                y1=midpoint,
+                line=dict(
+                    color=color,
+                    width=0.8,
+                    dash=dash_style
+                ),
                 layer="below"
             )
-            if id(zone) in label_keys:
-                label = f"{side} · INVALID" if invalidated else side
+
+            zone_key = (
+                source_tf,
+                side,
+                low,
+                high,
+                str(zone.get("Confirmed Time", ""))
+            )
+
+            if zone_key in label_keys:
+                label = f"{source_tf} {classification} · {side}"
                 fig.add_annotation(
-                    x=end_time, y=midpoint, text=label,
-                    showarrow=False, xanchor="right", yanchor="middle",
-                    yshift=(label_index - 1) * 11,
+                    x=end_time,
+                    y=midpoint,
+                    text=label,
+                    showarrow=False,
+                    xanchor="right",
+                    yanchor="middle",
+                    yshift=(label_index - 1) * 12,
                     font=dict(size=8, color=color),
-                    bgcolor="rgba(11,14,17,0.78)", borderpad=2
+                    bgcolor="rgba(11,14,17,0.82)",
+                    borderpad=2
                 )
                 label_index += 1
+
         except Exception:
             continue
 
@@ -405,14 +525,11 @@ def draw_ob_fvg_overlaps(fig, setups, data, start_time, end_time):
 # =========================================================
 
 def display_chart(data, result, sr_zones, symbol, timeframe):
-    # Keep up to 1,200 completed candles available for historical navigation.
     chart_data = data.tail(1200).copy()
     if chart_data.empty:
         st.warning("No candles are available.")
         return
 
-    # Separate controls make horizontal and vertical framing adjustable
-    # without changing the underlying analysis or historical data.
     x_control, y_control = st.columns(2)
     with x_control:
         visible_count = st.slider(
@@ -582,11 +699,11 @@ def display_chart(data, result, sr_zones, symbol, timeframe):
     )
 
     st.caption(
-        "Showing the selected candle window; pan left to inspect the wider 1,200-candle history. "
-        "Use the separate controls above to adjust horizontal and vertical framing. "
-        "Drag to pan | Pinch or use toolbar to zoom | "
-        "Yellow = latest completed close | Green = support / bullish | "
-        "Red = resistance / bearish | Dashed = S/R midpoint"
+        "4H major S/R = solid outline | 1H major S/R = dashed outline | "
+        "15M minor S/R = dotted outline. Green = support / bullish; "
+        "red = resistance / bearish. S/R zones remain valid until a completed "
+        "candle on their own source timeframe closes beyond the outer boundary. "
+        "Yellow = latest completed close."
     )
     if overlap_count == 0:
         st.info(
@@ -805,8 +922,10 @@ except Exception as error:
     st.stop()
 
 selected_data = frames.get(chart_timeframe, pd.DataFrame())
-with st.spinner(f"Analysing historical S/R on {chart_timeframe}..."):
-    sr_selected = run_sr_analysis(selected_data)
+
+# Calculate the three S/R layers regardless of the selected chart timeframe.
+with st.spinner("Building 4H major, 1H major and 15M minor S/R..."):
+    sr_all = build_combined_sr(frames)
 
 
 # =========================================================
@@ -834,7 +953,8 @@ st.divider()
 st.subheader("Price chart")
 st.caption(
     "The chart opens on the latest 90 candles. Pan through the latest "
-    "1,200 completed candles. Use the chart toolbar for precise zoom and reset."
+    "1,200 completed candles. All three S/R layers remain on the chart "
+    "when you change the chart timeframe."
 )
 
 if st.button("RETURN TO LATEST", use_container_width=True):
@@ -852,7 +972,7 @@ if (
     display_chart(
         selected_data,
         selected_analysis["data"],
-        sr_selected,
+        sr_all,
         symbol,
         chart_timeframe
     )
@@ -939,18 +1059,34 @@ except Exception as error:
 st.divider()
 st.subheader("Historical Support & Resistance Zones")
 
-if isinstance(sr_selected, pd.DataFrame) and not sr_selected.empty:
+if isinstance(sr_all, pd.DataFrame) and not sr_all.empty:
     st.caption(
-        f"Up to 8 S/R zones from the latest 400 {chart_timeframe} candles. "
-        "BROKEN means a candle close crossed the outer zone boundary."
+        "Combined S/R: 4H major, 1H major and 15M minor. "
+        "Each layer is calculated from its own completed-candle history. "
+        "A zone is invalidated only by a completed candle close beyond "
+        "its outer boundary on that zone's source timeframe."
     )
+
+    display_columns = [
+        column for column in [
+            "Source Timeframe", "Classification", "Side",
+            "Zone Low", "Zone High", "Midline",
+            "Confirmed Time", "Pivot Time", "Rejections",
+            "Strength", "Strong"
+        ]
+        if column in sr_all.columns
+    ]
+
     st.dataframe(
-        sr_selected.head(8),
+        sr_all[display_columns],
         use_container_width=True,
         hide_index=True
     )
 else:
-    st.info("No historical S/R zones are available for this timeframe.")
+    st.info(
+        "No 4H, 1H or 15M historical S/R zones are currently available. "
+        "Check the data availability section."
+    )
 
 
 # =========================================================
@@ -1055,17 +1191,20 @@ with st.expander("Data and engine information"):
         "OB and FVG zones. Standalone FVGs are not displayed."
     )
     st.write(
-        "S/R invalidation uses a completed candle close beyond the outer "
-        "zone boundary. A wick alone does not invalidate it."
+        "S/R uses completed-candle CLOSE invalidation on the zone's own "
+        "source timeframe. A wick alone does not invalidate a zone."
+    )
+    st.write(
+        "S/R layers: 4H major, 1H major and 15M minor. Each layer analyses "
+        "up to 400 completed candles from its own source timeframe."
     )
     st.write("The strategy analysis uses up to 1,200 candles per timeframe.")
     st.write(
-        "The S/R engine analyses up to 400 candles on the selected timeframe."
+        "No fabricated candles are created when market data is unavailable."
     )
-    st.write("No fabricated candles are created when market data is unavailable.")
     st.write(
         "The chart renders at most 1,200 candles for mobile performance. "
-        "It initially displays the latest 90 candles. Timed redraws are disabled "
+        "It initially displays the latest 60 candles. Timed redraws are disabled "
         "so touch gestures are not interrupted."
     )
 
