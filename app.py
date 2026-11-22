@@ -1437,3 +1437,181 @@ def display_chart(
             "in this chart window. "
             "Standalone FVGs are not drawn."
     )
+# =========================================================
+# PART 5 — HISTORICAL REVIEW AND STATISTICS
+# =========================================================
+
+def build_historical_summary(frames, analyses):
+    rows = []
+
+    for timeframe in TIMEFRAMES:
+        candles = frames.get(timeframe, pd.DataFrame())
+        analysis = analyses.get(timeframe, {})
+
+        if candles is None or candles.empty:
+            rows.append({
+                "Timeframe": timeframe,
+                "Status": "NO DATA",
+                "Candles": 0,
+                "First Candle": "—",
+                "Last Candle": "—",
+                "Missing Values": "—",
+            })
+            continue
+
+        missing = int(
+            candles[OHLCV_COLUMNS]
+            .isna()
+            .sum()
+            .sum()
+        )
+
+        rows.append({
+            "Timeframe": timeframe,
+            "Status": analysis.get("status", "NOT ANALYSED"),
+            "Candles": len(candles),
+            "First Candle": str(candles.index[0]),
+            "Last Candle": str(candles.index[-1]),
+            "Missing Values": missing,
+        })
+
+    return pd.DataFrame(rows)
+
+
+def display_historical_summary(frames, analyses):
+    st.subheader("Historical Data Review")
+
+    summary = build_historical_summary(
+        frames,
+        analyses,
+    )
+
+    if summary.empty:
+        st.info("No historical data is available.")
+        return
+
+    st.dataframe(
+        summary,
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    total_candles = int(summary["Candles"].sum())
+    successful = int(
+        summary["Status"].eq("ANALYSED").sum()
+    )
+    unavailable = int(
+        summary["Status"].eq("UNAVAILABLE").sum()
+    )
+    errors = int(
+        summary["Status"].eq("ERROR").sum()
+    )
+
+    first, second, third, fourth = st.columns(4)
+
+    first.metric(
+        "Total Historical Candles",
+        f"{total_candles:,}",
+    )
+
+    second.metric(
+        "Analysed Timeframes",
+        f"{successful}/{len(TIMEFRAMES)}",
+    )
+
+    third.metric(
+        "Unavailable",
+        unavailable,
+    )
+
+    fourth.metric(
+        "Analysis Errors",
+        errors,
+    )
+
+
+def display_analysis_status(analyses):
+    st.subheader("Timeframe Analysis Status")
+
+    for timeframe in TIMEFRAMES:
+        result = analyses.get(timeframe, {})
+        status = result.get("status", "UNKNOWN")
+
+        if status == "ANALYSED":
+            st.success(
+                f"{timeframe}: Historical analysis completed."
+            )
+
+        elif status == "UNAVAILABLE":
+            st.warning(
+                f"{timeframe}: Historical data unavailable."
+            )
+
+        else:
+            error = result.get(
+                "error",
+                "Unknown analysis error.",
+            )
+            st.error(
+                f"{timeframe}: {error}"
+            )
+
+
+def display_historical_candle_details(frames):
+    st.subheader("Historical Candle Details")
+
+    available = [
+        timeframe
+        for timeframe in TIMEFRAMES
+        if (
+            isinstance(
+                frames.get(timeframe),
+                pd.DataFrame,
+            )
+            and not frames[timeframe].empty
+        )
+    ]
+
+    if not available:
+        st.info("There are no candles to display.")
+        return
+
+    selected = st.selectbox(
+        "Select historical timeframe",
+        available,
+        key="historical_detail_timeframe",
+    )
+
+    candles = frames[selected].copy()
+
+    st.caption(
+        f"{selected} historical records: {len(candles):,}"
+    )
+
+    st.dataframe(
+        candles.tail(100).sort_index(
+            ascending=False
+        ),
+        use_container_width=True,
+    )
+
+
+def display_historical_review(frames, analyses):
+    st.header("Historical Market Review")
+
+    display_historical_summary(
+        frames,
+        analyses,
+    )
+
+    st.divider()
+
+    display_analysis_status(
+        analyses,
+    )
+
+    st.divider()
+
+    display_historical_candle_details(
+        frames,
+    )
