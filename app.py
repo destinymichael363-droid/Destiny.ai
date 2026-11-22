@@ -384,6 +384,194 @@ def run_all_analyses(frames):
                     "Analysis engine returned an unexpected result type."
                 )
 
+# =========================================================
+# HISTORICAL ENGINE DATA — TABLE DISPLAY
+# =========================================================
+
+st.divider()
+st.header("Historical Engine Records")
+
+stats = result_data.get("statistics", {})
+
+if stats:
+    st.subheader("Historical Statistics")
+
+    stat_col1, stat_col2, stat_col3, stat_col4 = st.columns(4)
+
+    stat_col1.metric(
+        "Bullish BOS History",
+        stats.get("bullish_bos", 0)
+    )
+
+    stat_col2.metric(
+        "Bearish BOS History",
+        stats.get("bearish_bos", 0)
+    )
+
+    stat_col3.metric(
+        "Historical OB/FVG Records",
+        stats.get("returned_historical_setups", 0)
+    )
+
+    stat_col4.metric(
+        "Invalidated Historical Records",
+        stats.get("invalidated_setups", 0)
+    )
+
+# ---------------------------------------------------------
+# HISTORICAL BOS RECORDS
+# ---------------------------------------------------------
+
+candles = result_data.get(
+    "candles",
+    pd.DataFrame()
+)
+
+if isinstance(candles, pd.DataFrame) and not candles.empty:
+
+    bos_columns = [
+        "Bullish_BOS",
+        "Bearish_BOS",
+    ]
+
+    if all(col in candles.columns for col in bos_columns):
+
+        bos_records = candles[
+            candles["Bullish_BOS"]
+            | candles["Bearish_BOS"]
+        ].copy()
+
+        if not bos_records.empty:
+
+            bos_records["Historical Event"] = (
+                bos_records.apply(
+                    lambda row: (
+                        "Bullish BOS"
+                        if row["Bullish_BOS"]
+                        else "Bearish BOS"
+                    ),
+                    axis=1
+                )
+            )
+
+            bos_records["Time"] = bos_records.index
+
+            st.subheader("Historical BOS Records")
+
+            st.dataframe(
+                bos_records[
+                    [
+                        "Time",
+                        "Historical Event",
+                        "Open",
+                        "High",
+                        "Low",
+                        "Close",
+                    ]
+                ].sort_values(
+                    "Time",
+                    ascending=False
+                ).head(100),
+                use_container_width=True,
+                hide_index=True
+            )
+
+        else:
+            st.info("No historical BOS records found.")
+
+# ---------------------------------------------------------
+# HISTORICAL BSL / SSL SWEEPS
+# ---------------------------------------------------------
+
+liquidity = result_data.get(
+    "liquidity",
+    pd.DataFrame()
+)
+
+if isinstance(liquidity, pd.DataFrame) and not liquidity.empty:
+
+    swept_records = liquidity[
+        liquidity["swept"].eq(True)
+    ].copy()
+
+    if not swept_records.empty:
+
+        st.subheader("Historical Liquidity Sweeps")
+
+        swept_records = swept_records.rename(
+            columns={
+                "side": "Liquidity Type",
+                "price": "Historical Level",
+                "pivot_time": "Original Pivot Time",
+                "swept_time": "Sweep Time",
+                "swept": "Swept",
+            }
+        )
+
+        st.dataframe(
+            swept_records[
+                [
+                    "Liquidity Type",
+                    "Historical Level",
+                    "Original Pivot Time",
+                    "Sweep Time",
+                    "Swept",
+                ]
+            ].sort_values(
+                "Sweep Time",
+                ascending=False
+            ).head(100),
+            use_container_width=True,
+            hide_index=True
+        )
+
+    else:
+        st.info("No historical liquidity sweeps recorded.")
+
+# ---------------------------------------------------------
+# HISTORICAL OB / FVG OVERLAP RECORDS
+# ---------------------------------------------------------
+
+setups = result_data.get(
+    "setups",
+    pd.DataFrame()
+)
+
+if isinstance(setups, pd.DataFrame) and not setups.empty:
+
+    st.subheader("Historical OB/FVG Overlap Records")
+
+    setup_display = setups.copy()
+
+    st.dataframe(
+        setup_display[
+            [
+                "direction",
+                "bos_time",
+                "ob_time",
+                "ob_low",
+                "ob_high",
+                "fvg_time",
+                "fvg_low",
+                "fvg_high",
+                "status",
+            ]
+        ].sort_values(
+            "bos_time",
+            ascending=False
+        ).head(100),
+        use_container_width=True,
+        hide_index=True
+    )
+
+else:
+    st.info("No historical OB/FVG overlap records available.")
+
+st.caption(
+    "These tables are retrospective records of historical data, "
+    "not live trading signals or instructions."
+)
+
             results[timeframe] = {
                 "status": "ANALYSED",
                 "data": output,
