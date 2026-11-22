@@ -4,6 +4,13 @@ import io
 import contextlib
 import importlib
 import traceback
+import sys
+import os
+
+ROOT = os.path.dirname(os.path.abspath(__file__))
+
+if ROOT not in sys.path:
+    sys.path.insert(0, ROOT)
 
 st.set_page_config(
     page_title="Destiny AI — S/R Audits",
@@ -13,26 +20,17 @@ st.set_page_config(
 st.title("Destiny AI — S/R Audits")
 st.caption("Synthetic diagnostics only • No live-market signals")
 
-if st.button("Run Historical Integrity Audit", type="secondary"):
+
+def run_audit(module_name):
     output = io.StringIO()
+
     try:
-        audit = importlib.import_module("sr_audit")
-        importlib.reload(audit)
+        importlib.invalidate_caches()
 
-        with contextlib.redirect_stdout(output):
-            audit.main()
-
-        st.code(output.getvalue(), language="text")
-
-    except Exception:
-        st.error("Historical audit encountered an error.")
-        st.code(traceback.format_exc())
-
-if st.button("Run Historical Replay Audit", type="primary"):
-    output = io.StringIO()
-    try:
-        audit = importlib.import_module("sr_replay_audit")
-        importlib.reload(audit)
+        if module_name in sys.modules:
+            audit = importlib.reload(sys.modules[module_name])
+        else:
+            audit = importlib.import_module(module_name)
 
         with contextlib.redirect_stdout(output):
             audit.main()
@@ -41,10 +39,19 @@ if st.button("Run Historical Replay Audit", type="primary"):
         st.code(results, language="text")
 
         if "[FAIL]" in results:
-            st.error("Replay audit found a failure.")
+            st.error("Audit found a failure. Review the output.")
         else:
-            st.success("Replay audit completed. Review its results.")
+            st.success("Audit completed. Review the results.")
 
     except Exception:
-        st.error("Replay audit encountered an error.")
+        st.error("Audit could not run.")
         st.code(traceback.format_exc())
+        st.code(output.getvalue(), language="text")
+
+
+if st.button("Run Historical Integrity Audit"):
+    run_audit("sr_audit")
+
+
+if st.button("Run Historical Replay Audit", type="primary"):
+    run_audit("sr_replay_audit")
