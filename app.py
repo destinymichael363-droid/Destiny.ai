@@ -426,7 +426,7 @@ def display_chart(data, result, sr_zones, symbol, timeframe):
     reset_counter = st.session_state.get("destiny_chart_reset_counter", 0)
     fig.update_layout(
         title=dict(text=f"{symbol} | {timeframe}", x=0.02, xanchor="left", font=dict(size=18, color="#E6EAF0")),
-        template="plotly_dark", paper_bgcolor="#0B0E11", plot_bgcolor="#0B0E11", height=640, autosize=True,
+        template="plotly_dark", paper_bgcolor="#0B0E11", plot_bgcolor="#0B0E11", height=780, autosize=True,
         margin=dict(l=8, r=82, t=58, b=35), font=dict(family="Arial, sans-serif", size=13, color="#D7DCE2"),
         hoverlabel=dict(bgcolor="#20262D", bordercolor="#59636E", font=dict(size=12, color="#FFFFFF")),
         hovermode="closest", dragmode="pan", showlegend=False,
