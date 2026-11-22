@@ -9,8 +9,13 @@ from typing import Literal
 class VirtualPosition:
     symbol: str
     side: Literal["LONG", "SHORT"]
-    size: float
+    units: float
+    margin_used: float
     entry_price: float
+    stop_loss: float
+    take_profit: float
+    risk_usd: float
+    rr_ratio: float
     opened_at: str
 
 
@@ -22,79 +27,139 @@ class VirtualAccount:
     trade_history: list[dict] = field(default_factory=list)
 
     def reset(self, new_starting_balance: float | None = None) -> None:
-        base = (
-            float(new_starting_balance)
-            if new_starting_balance is not None
-            else self.starting_balance
-        )
+        base = float(new_starting_balance) if new_starting_balance is not None else self.starting_balance
         self.starting_balance = base
         self.balance = base
         self.positions.clear()
         self.trade_history.clear()
 
-    def open_position(
+    def open_position_with_risk(
         self,
         symbol: str,
         side: Literal["LONG", "SHORT"],
-        notional_usd: float,
-        price: float,
+        entry_price: float,
+        stop_loss: float,
+        take_profit: float,
+        risk_percent: float = 2.0,
+        max_leverage: float = 20.0,
     ) -> tuple[bool, str]:
-        if price <= 0 or notional_usd <= 0:
-            return False, "Price and order size must be greater than zero."
-        if notional_usd > self.balance:
-            return False, "Not enough virtual balance for that order size."
+        if entry_price <= 0 or stop_loss <= 0 or take_profit <= 0:
+            return False, "Entry, Stop Loss, and Take Profit must all be positive."
 
-        qty = notional_usd / price
-        self.balance -= notional_usd
+        if side == "LONG" and not (stop_loss < entry_price < take_profit):
+            return False, "For LONG: Stop Loss must be below Entry, and Take Profit above Entry."
+        if side == "SHORT" and not (take_profit < entry_price < stop_loss):
+            return False, "For SHORT: Take Profit must be below Entry, and Stop Loss above Entry."
+
+        stop_distance = abs(entry_price - stop_loss)
+        reward_distance = abs(take_profit - entry_price)
+        if stop_distance <= 0:
+            return False, "Stop Loss cannot equal Entry Price."
+
+        risk_usd = self.balance * (risk_percent / 100.0)
+        if risk_usd <= 0 or self.balance <= 0:
+            return False, "Insufficient balance to risk."
+
+        units = risk_usd / stop_distance
+        notional_value = units * entry_price
+        margin_required = notional_value / max_leverage
+
+        if margin_required > self.balance:
+            margin_required = self.balance
+            units = (margin_required * max_leverage) / entry_price
+            risk_usd = units * stop_distance
+
+        rr_ratio = reward_distance / stop_distance
+        self.balance -= margin_required
+
         self.positions.append(
             VirtualPosition(
                 symbol=symbol,
                 side=side,
-                size=qty,
-                entry_price=price,
+                units=units,
+                margin_used=margin_required,
+                entry_price=entry_price,
+                stop_loss=stop_loss,
+                take_profit=take_profit,
+                risk_usd=risk_usd,
+                rr_ratio=rr_ratio,
                 opened_at=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
             )
         )
-        return True, f"Opened {side} {qty:.5f} {symbol} @ {price:,.5f}"
+        return (
+            True,
+            f"Opened {side} {symbol} @ {entry_price:,.5f} | SL: {stop_loss:,.5f} | TP: {take_profit:,.5f} (1:{rr_ratio:.1f} R:R)",
+        )
 
-    def close_position(self, index: int, exit_price: float) -> tuple[bool, str]:
+    def close_position(
+        self,
+        index: int,
+        exit_price: float,
+        reason: str = "Manual Close",
+    ) -> tuple[bool, str]:
         if index < 0 or index >= len(self.positions):
             return False, "Position not found."
         if exit_price <= 0:
             return False, "Invalid exit price."
 
         pos = self.positions.pop(index)
-        initial_notional = pos.size * pos.entry_price
-
         if pos.side == "LONG":
-            proceeds = pos.size * exit_price
-            pnl = proceeds - initial_notional
+            pnl = (exit_price - pos.entry_price) * pos.units
         else:
-            pnl = (pos.entry_price - exit_price) * pos.size
-            proceeds = max(0.0, initial_notional + pnl)
+            pnl = (pos.entry_price - exit_price) * pos.units
 
-        self.balance += proceeds
+        returned_cash = max(0.0, pos.margin_used + pnl)
+        self.balance += returned_cash
+        r_multiple = pnl / pos.risk_usd if pos.risk_usd > 0 else 0.0
+
         self.trade_history.append(
             {
                 "closed_at": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
                 "symbol": pos.symbol,
                 "side": pos.side,
-                "size": round(pos.size, 6),
-                "entry": pos.entry_price,
-                "exit": exit_price,
+                "entry": round(pos.entry_price, 5),
+                "exit": round(exit_price, 5),
+                "sl": round(pos.stop_loss, 5),
+                "tp": round(pos.take_profit, 5),
                 "pnl_usd": round(pnl, 2),
+                "r_result": f"{r_multiple:+.2f}R",
+                "reason": reason,
             }
         )
-        return True, f"Closed {pos.side} {pos.symbol} | P&L: {pnl:+.2f} USD"
+        return True, f"Closed {pos.side} {pos.symbol} ({reason}) | P&L: {pnl:+.2f} USD ({r_multiple:+.2f}R)"
+
+    def evaluate_tp_sl(self, symbol: str, candle_high: float, candle_low: float) -> list[str]:
+        """Checks open positions for `symbol` against latest candle High/Low and closes any hit."""
+        messages: list[str] = []
+        for idx in range(len(self.positions) - 1, -1, -1):
+            pos = self.positions[idx]
+            if pos.symbol != symbol:
+                continue
+
+            if pos.side == "LONG":
+                if candle_low <= pos.stop_loss:
+                    _, msg = self.close_position(idx, pos.stop_loss, reason="Stop Loss Hit")
+                    messages.append(msg)
+                elif candle_high >= pos.take_profit:
+                    _, msg = self.close_position(idx, pos.take_profit, reason="Take Profit Hit")
+                    messages.append(msg)
+            else:
+                if candle_high >= pos.stop_loss:
+                    _, msg = self.close_position(idx, pos.stop_loss, reason="Stop Loss Hit")
+                    messages.append(msg)
+                elif candle_low <= pos.take_profit:
+                    _, msg = self.close_position(idx, pos.take_profit, reason="Take Profit Hit")
+                    messages.append(msg)
+        return messages
 
     def unrealized_pnl(self, current_prices: dict[str, float]) -> float:
         total = 0.0
         for pos in self.positions:
             px = current_prices.get(pos.symbol, pos.entry_price)
             if pos.side == "LONG":
-                total += (px - pos.entry_price) * pos.size
+                total += (px - pos.entry_price) * pos.units
             else:
-                total += (pos.entry_price - px) * pos.size
+                total += (pos.entry_price - px) * pos.units
         return total
 
 
@@ -123,9 +188,7 @@ class BrokerSession:
         self.broker_name = broker_name
         self.environment = environment
         self.account_label = account_label.strip() or f"{broker_name} Account"
-        self.api_key_masked = (
-            f"{clean_key[:4]}...{clean_key[-4:]}" if len(clean_key) >= 8 else "****"
-        )
+        self.api_key_masked = f"{clean_key[:4]}...{clean_key[-4:]}" if len(clean_key) >= 8 else "****"
         return True, f"Connected {self.account_label} ({environment})."
 
     def disconnect(self) -> None:
@@ -133,4 +196,3 @@ class BrokerSession:
         self.broker_name = "None"
         self.account_label = ""
         self.api_key_masked = ""
-
