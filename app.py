@@ -1063,3 +1063,377 @@ def draw_ob_fvg_overlaps(
             continue
 
     return drawn
+# =========================================================
+# MOBILE-FRIENDLY HISTORICAL CHART
+# =========================================================
+
+def display_chart(
+    data,
+    result,
+    sr_zones,
+    symbol,
+    timeframe,
+):
+
+    chart_data = data.tail(1200).copy()
+
+    if chart_data.empty:
+        st.warning("No candles are available.")
+        return
+
+    left, right = st.columns(2)
+
+    with left:
+
+        visible_count = st.slider(
+            "Candles on screen",
+            30,
+            180,
+            60,
+            10,
+            key=f"visible_{symbol}_{timeframe}",
+        )
+
+    with right:
+
+        vertical_scale = st.slider(
+            "Vertical zoom",
+            0.6,
+            2.0,
+            1.0,
+            0.1,
+            key=f"vertical_{symbol}_{timeframe}",
+            help="Adjust the visible vertical price range.",
+        )
+
+    start_time = chart_data.index[0]
+    end_time = chart_data.index[-1]
+
+    latest_close = float(
+        chart_data["Close"].iloc[-1]
+    )
+
+    visible = chart_data.tail(
+        visible_count
+    )
+
+    first_visible = visible.index[0]
+
+    visible_low = float(
+        visible["Low"].min()
+    )
+
+    visible_high = float(
+        visible["High"].max()
+    )
+
+    span = max(
+        visible_high - visible_low,
+        abs(latest_close) * 0.002,
+    )
+
+    center = (
+        visible_high + visible_low
+    ) / 2
+
+    half_range = max(
+        span * 0.55 * vertical_scale,
+        abs(latest_close) * 0.0005,
+    )
+
+    y_range = [
+        center - half_range,
+        center + half_range,
+    ]
+
+    fig = go.Figure()
+
+    volume_custom = (
+        chart_data["Volume"]
+        .fillna(0)
+        .to_numpy()
+        .reshape(-1, 1)
+    )
+
+    # -----------------------------------------------------
+    # PRICE CANDLES
+    # -----------------------------------------------------
+
+    fig.add_trace(
+        go.Candlestick(
+            x=chart_data.index,
+            open=chart_data["Open"],
+            high=chart_data["High"],
+            low=chart_data["Low"],
+            close=chart_data["Close"],
+            customdata=volume_custom,
+            name="Price",
+
+            increasing_line_color="#20C997",
+            decreasing_line_color="#F05B65",
+
+            increasing_fillcolor="#20C997",
+            decreasing_fillcolor="#F05B65",
+
+            whiskerwidth=1,
+
+            hovertemplate=(
+                "<b>%{x|%d %b %Y %H:%M}</b><br>"
+                "Open: %{open:,.5f}<br>"
+                "High: %{high:,.5f}<br>"
+                "Low: %{low:,.5f}<br>"
+                "Close: %{close:,.5f}<br>"
+                "Volume: %{customdata[0]:,.0f}"
+                "<extra></extra>"
+            ),
+        )
+    )
+
+    # -----------------------------------------------------
+    # SUPPORT AND RESISTANCE
+    # -----------------------------------------------------
+
+    draw_sr_zones(
+        fig,
+        sr_zones,
+        chart_data,
+        start_time,
+        end_time,
+    )
+
+    # -----------------------------------------------------
+    # OB / FVG OVERLAPS
+    # -----------------------------------------------------
+
+    overlap_count = draw_ob_fvg_overlaps(
+        fig,
+        result.get(
+            "setups",
+            pd.DataFrame()
+        ),
+        chart_data,
+        start_time,
+        end_time,
+    )
+
+    # -----------------------------------------------------
+    # BSL / SSL LEVELS
+    # -----------------------------------------------------
+
+    liquidity = result.get(
+        "liquidity",
+        pd.DataFrame()
+    )
+
+    if (
+        isinstance(liquidity, pd.DataFrame)
+        and not liquidity.empty
+        and {
+            "swept",
+            "price",
+            "side",
+        }.issubset(liquidity.columns)
+    ):
+
+        active_liquidity = liquidity[
+            liquidity["swept"].eq(False)
+        ].tail(6)
+
+        for _, level in active_liquidity.iterrows():
+
+            try:
+
+                price = float(
+                    level["price"]
+                )
+
+                color = (
+                    "#F05B65"
+                    if str(
+                        level["side"]
+                    ).upper() == "BSL"
+                    else "#20C997"
+                )
+
+                fig.add_hline(
+                    y=price,
+                    line_dash="dot",
+                    line_color=color,
+                    line_width=1.2,
+                )
+
+            except Exception:
+                continue
+
+    # -----------------------------------------------------
+    # LATEST COMPLETED CANDLE PRICE
+    # -----------------------------------------------------
+
+    fig.add_hline(
+        y=latest_close,
+        line_color="#FFD54F",
+        line_width=1.7,
+        annotation_text=(
+            f"Latest close {latest_close:,.5f}"
+        ),
+        annotation_position="top right",
+        annotation_font=dict(
+            color="#FFD54F",
+            size=10,
+        ),
+        annotation_bgcolor=(
+            "rgba(20,20,20,0.88)"
+        ),
+    )
+
+    reset_counter = st.session_state.get(
+        "destiny_chart_reset_counter",
+        0,
+    )
+
+    # -----------------------------------------------------
+    # CHART LAYOUT
+    # -----------------------------------------------------
+
+    fig.update_layout(
+
+        title=dict(
+            text=f"{symbol} | {timeframe}",
+            x=0.02,
+            xanchor="left",
+            font=dict(
+                size=18,
+                color="#E6EAF0",
+            ),
+        ),
+
+        template="plotly_dark",
+
+        paper_bgcolor="#0B0E11",
+        plot_bgcolor="#0B0E11",
+
+        height=780,
+        autosize=True,
+
+        margin=dict(
+            l=8,
+            r=82,
+            t=58,
+            b=35,
+        ),
+
+        font=dict(
+            family="Arial, sans-serif",
+            size=13,
+            color="#D7DCE2",
+        ),
+
+        hoverlabel=dict(
+            bgcolor="#20262D",
+            bordercolor="#59636E",
+            font=dict(
+                size=12,
+                color="#FFFFFF",
+            ),
+        ),
+
+        hovermode="closest",
+        dragmode="pan",
+        showlegend=False,
+
+        uirevision=(
+            f"destiny-{symbol}-"
+            f"{timeframe}-{reset_counter}"
+        ),
+
+        xaxis=dict(
+            type="date",
+            range=[
+                first_visible,
+                end_time,
+            ],
+            rangeslider=dict(
+                visible=False
+            ),
+            tickformat="%d %b",
+            nticks=5,
+            showgrid=True,
+            gridcolor=(
+                "rgba(180,190,200,0.10)"
+            ),
+            showspikes=True,
+            spikemode="across",
+            spikesnap="cursor",
+            automargin=True,
+        ),
+
+        yaxis=dict(
+            side="right",
+            range=y_range,
+            autorange=False,
+            fixedrange=False,
+            showgrid=True,
+            gridcolor=(
+                "rgba(180,190,200,0.10)"
+            ),
+            showspikes=True,
+            spikemode="across",
+            spikesnap="cursor",
+            automargin=True,
+        ),
+    )
+
+    # -----------------------------------------------------
+    # DISPLAY CHART
+    # -----------------------------------------------------
+
+    st.plotly_chart(
+        fig,
+        use_container_width=True,
+
+        config={
+            "scrollZoom": True,
+            "displayModeBar": True,
+            "displaylogo": False,
+            "responsive": True,
+            "doubleClick": "reset",
+
+            "modeBarButtonsToAdd": [
+                "pan2d",
+                "zoom2d",
+                "zoomIn2d",
+                "zoomOut2d",
+                "autoScale2d",
+                "resetScale2d",
+            ],
+
+            "modeBarButtonsToRemove": [
+                "select2d",
+                "lasso2d",
+            ],
+        },
+
+        key=(
+            f"destiny-chart-"
+            f"{symbol}-{timeframe}"
+        ),
+    )
+
+    st.caption(
+        "4H major S/R: solid | "
+        "1H major: dashed | "
+        "15M minor: dotted. "
+        "Green: support/bullish; "
+        "red: resistance/bearish. "
+        "Yellow: latest completed close. "
+        "S/R invalidation is close-based "
+        "on its source timeframe."
+    )
+
+    if overlap_count == 0:
+
+        st.info(
+            "No qualified OB/FVG overlap is visible "
+            "in this chart window. "
+            "Standalone FVGs are not drawn."
+    )
