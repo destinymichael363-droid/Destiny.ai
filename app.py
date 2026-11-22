@@ -1773,8 +1773,9 @@ display_chart(
     selected_timeframe,
 )
 
+
 # ---------------------------------------------------------
-# MULTI-TIMEFRAME CONTEXT
+# MULTI-TIMEFRAME CONTEXT — READABLE DISPLAY
 # ---------------------------------------------------------
 
 st.divider()
@@ -1783,31 +1784,62 @@ st.header("Multi-Timeframe Context")
 try:
     mtf_result = build_mtf_context(analyses)
 
-    if isinstance(mtf_result, pd.DataFrame):
-        if not mtf_result.empty:
+    if isinstance(mtf_result, dict):
+        timeframe_data = mtf_result.get("timeframes", {})
+
+        if timeframe_data:
+            mtf_rows = []
+
+            for tf, details in timeframe_data.items():
+                mtf_rows.append({
+                    "Timeframe": tf,
+                    "Status": details.get("status", "Unknown"),
+                    "Structure": details.get("structure", "Unknown"),
+                    "Bullish BOS": details.get("bullish_bos", 0),
+                    "Bearish BOS": details.get("bearish_bos", 0),
+                    "Candles": details.get("candle_count", 0),
+                })
+
+            mtf_df = pd.DataFrame(mtf_rows)
+
             st.dataframe(
-                mtf_result,
+                mtf_df,
                 use_container_width=True,
                 hide_index=True,
             )
-        else:
-            st.info(
-                "No multi-timeframe context is available."
-            )
 
-    elif isinstance(mtf_result, dict):
-        st.json(mtf_result)
+        st.info(
+            mtf_result.get(
+                "higher_timeframe_summary",
+                "Higher timeframe summary unavailable."
+            )
+        )
+
+        st.caption(
+            mtf_result.get(
+                "lower_timeframe_summary",
+                "Lower timeframe summary unavailable."
+            )
+        )
+
+        st.caption(
+            "Data coverage: "
+            + str(
+                mtf_result.get(
+                    "data_coverage",
+                    "Unknown"
+                )
+            )
+        )
 
     else:
-        st.info(
-            "The multi-timeframe module returned "
-            "an unsupported result format."
-        )
+        st.warning("Multi-timeframe data is unavailable.")
 
 except Exception as exc:
     st.warning(
         f"Multi-timeframe context unavailable: {exc}"
     )
+
 
 # ---------------------------------------------------------
 # HISTORICAL REVIEW
