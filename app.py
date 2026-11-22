@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 import json
+import os
+import random
+import smtplib
+from email.message import EmailMessage
 from pathlib import Path
 
 import numpy as np
@@ -53,9 +57,74 @@ def fetch_tf_chart(symbol: str, tf_label: str) -> pd.DataFrame:
     interval, period = TF_CONFIG.get(tf_label, ("1h", "60d"))
     try:
         raw = yf.Ticker(symbol).history(period=period, interval=interval, auto_adjust=False, actions=False)
-        return _clean_ohlcv(raw).tail(220)
+        return _clean_ohlcv(raw).tail(160)
     except Exception:
         return pd.DataFrame(columns=["Open", "High", "Low", "Close", "Volume"])
+
+
+def _send_confirmation_email(to_email: str, code: str) -> tuple[bool, str]:
+    """Sends a confirmation code via SMTP if configured; otherwise displays it for testing."""
+    smtp_host = os.getenv("SMTP_HOST", "").strip()
+    smtp_port = int(os.getenv("SMTP_PORT", "587"))
+    smtp_user = os.getenv("SMTP_USER", "").strip()
+    smtp_pass = os.getenv("SMTP_PASS", "").strip()
+    smtp_from = os.getenv("SMTP_FROM", smtp_user).strip()
+
+    if not smtp_host or not smtp_user or not smtp_pass:
+        return False, f"SMTP not configured yet. Use confirmation code: **{code}**"
+
+    try:
+        msg = EmailMessage()
+        msg["Subject"] = "DESTINY AI — Confirm Your Email Address"
+        msg["From"] = smtp_from
+        msg["To"] = to_email
+        msg.set_content(
+            f"Welcome to DESTINY AI!\n\n"
+            f"Your email confirmation code is: {code}\n\n"
+            f"Enter this code on the sign-up screen to finish creating your account."
+        )
+        with smtplib.SMTP(smtp_host, smtp_port, timeout=15) as server:
+            server.starttls()
+            server.login(smtp_user, smtp_pass)
+            server.send_message(msg)
+        return True, f"Confirmation code sent to **{to_email}**."
+    except Exception as exc:
+        return False, f"Could not send email ({exc}). Fallback code: **{code}**"
+
+
+def _login_session_user(username: str) -> None:
+    st.session_state["auth_user"] = username
+    st.session_state.setdefault("virtual_account", VirtualAccount())
+    st.session_state.setdefault("broker_session", BrokerSession())
+    st.session_state.pop("pending_signup", None)
+
+
+def _render_google_auth_section() -> None:
+    """Supports Streamlit native Google OAuth (st.login) if configured in secrets."""
+    has_st_login = hasattr(st, "login") and hasattr(st, "user")
+    auth_cfg = st.secrets.get("auth", {}) if hasattr(st, "secrets") else {}
+    google_configured = bool(auth_cfg.get("google") or os.getenv("GOOGLE_OAUTH_ENABLED", "").lower() == "true")
+
+    if has_st_login and getattr(st.user, "is_logged_in", False):
+        g_email = str(getattr(st.user, "email", "") or "")
+        g_name = str(getattr(st.user, "name", "") or g_email.split("@")[0] or "google_user")
+        clean_handle = "".join(ch if ch.isalnum() or ch == "_" else "_" for ch in g_name)[:24] or "google_user"
+        if g_email:
+            # Ensure a local account exists for automatic Google sign-up
+            register_user(clean_handle, g_email, os.urandom(12).hex())
+        _login_session_user(clean_handle)
+        st.rerun()
+
+    st.markdown("#### Quick Sign In / Sign Up with Google")
+    if has_st_login and google_configured:
+        if st.button("Continue with Google", use_container_width=True):
+            st.login("google")
+    else:
+        st.caption(
+            "To enable one-click Google sign-up/login, add `[auth]` and `[auth.google]` credentials "
+            "(`client_id`, `client_secret`, `server_metadata_url`, `redirect_uri`, `cookie_secret`) "
+            "in `.streamlit/secrets.toml`."
+        )
 
 
 def render_auth_gate() -> bool:
@@ -63,9 +132,12 @@ def render_auth_gate() -> bool:
         return True
 
     st.title("DESTINY AI — Sign In or Create Account")
-    st.caption("Private write access protects individual virtual accounts and session state.")
+    st.caption("Sign in or create an account with email confirmation to access charts, virtual trading, and worker feed.")
 
-    tab_login, tab_signup = st.tabs(["Sign In", "Create Account"])
+    _render_google_auth_section()
+    st.divider()
+
+    tab_login, tab_signup = st.tabs(["Sign In", "Create Account (Confirm Email)"])
 
     with tab_login:
         with st.form("login_form"):
@@ -75,33 +147,62 @@ def render_auth_gate() -> bool:
             if submitted:
                 res = authenticate_user(ident, pw)
                 if res.ok and res.username:
-                    st.session_state["auth_user"] = res.username
-                    st.session_state["virtual_account"] = VirtualAccount()
-                    st.session_state["broker_session"] = BrokerSession()
+                    _login_session_user(res.username)
                     st.rerun()
                 else:
                     st.error(res.message)
 
     with tab_signup:
-        with st.form("signup_form"):
-            u = st.text_input("Username (3–24 letters, numbers, underscores)")
-            em = st.text_input("Email")
-            pw1 = st.text_input("Password (8+ characters)", type="password")
-            pw2 = st.text_input("Confirm Password", type="password")
-            submitted = st.form_submit_button("Create Account")
-            if submitted:
-                if pw1 != pw2:
-                    st.error("Passwords do not match.")
-                else:
-                    res = register_user(u, em, pw1)
-                    if res.ok and res.username:
-                        st.session_state["auth_user"] = res.username
-                        st.session_state["virtual_account"] = VirtualAccount()
-                        st.session_state["broker_session"] = BrokerSession()
-                        st.success("Account created. Welcome!")
-                        st.rerun()
+        pending = st.session_state.get("pending_signup")
+        if not pending:
+            with st.form("signup_step1_form"):
+                u = st.text_input("Username (3–24 letters, numbers, underscores)")
+                em = st.text_input("Email Address")
+                pw1 = st.text_input("Password (8+ characters)", type="password")
+                pw2 = st.text_input("Confirm Password", type="password")
+                send_code_btn = st.form_submit_button("Send Confirmation Code")
+                if send_code_btn:
+                    if not em or "@" not in em:
+                        st.error("Please enter a valid email address.")
+                    elif pw1 != pw2:
+                        st.error("Passwords do not match.")
+                    elif len(pw1) < 8:
+                        st.error("Password must be at least 8 characters.")
                     else:
-                        st.error(res.message)
+                        code = f"{random.randint(100000, 999999)}"
+                        sent_ok, delivery_msg = _send_confirmation_email(em.strip(), code)
+                        st.session_state["pending_signup"] = {
+                            "username": u.strip(),
+                            "email": em.strip(),
+                            "password": pw1,
+                            "code": code,
+                            "delivery_msg": delivery_msg,
+                            "sent_ok": sent_ok,
+                        }
+                        st.rerun()
+        else:
+            st.info(pending["delivery_msg"])
+            with st.form("signup_verify_form"):
+                entered_code = st.text_input("Enter 6-Digit Confirmation Code", max_chars=6)
+                col_a, col_b = st.columns(2)
+                confirm_btn = col_a.form_submit_button("Confirm Email & Finish Sign Up")
+                cancel_btn = col_b.form_submit_button("Change Email / Restart")
+
+                if cancel_btn:
+                    st.session_state.pop("pending_signup", None)
+                    st.rerun()
+
+                if confirm_btn:
+                    if entered_code.strip() != pending["code"]:
+                        st.error("Invalid confirmation code. Please check and try again.")
+                    else:
+                        res = register_user(pending["username"], pending["email"], pending["password"])
+                        if res.ok and res.username:
+                            _login_session_user(res.username)
+                            st.success("Email confirmed and account created!")
+                            st.rerun()
+                        else:
+                            st.error(res.message)
 
     return False
 
@@ -139,8 +240,20 @@ def _get_val(obj: object, names: tuple[str, ...], default: object = None) -> obj
     return default
 
 
+def _ensure_min_box_height(low_val: float, high_val: float, min_height: float) -> tuple[float, float]:
+    """Ensures a zone renders as a clear box rather than a razor-thin line."""
+    bot = min(float(low_val), float(high_val))
+    top = max(float(low_val), float(high_val))
+    if (top - bot) < min_height:
+        mid = (top + bot) / 2.0
+        half = min_height / 2.0
+        bot = mid - half
+        top = mid + half
+    return bot, top
+
+
 def _filter_close_invalidated_sr(df: pd.DataFrame, zones: list) -> list:
-    """Removes S/R zones whose range is broken by a candle CLOSE after zone start."""
+    """Keeps only S/R zones not broken by a candle CLOSE after zone creation."""
     if df.empty or not zones:
         return []
     closes = df["Close"].to_numpy(dtype=float)
@@ -153,55 +266,38 @@ def _filter_close_invalidated_sr(df: pd.DataFrame, zones: list) -> list:
         b_val, t_val = float(bottom), float(top)
         if b_val > t_val:
             b_val, t_val = t_val, b_val
-
-        # Respect explicit invalidated flag if engine already marked it
         if bool(_get_val(sz, ("invalidated", "broken", "mitigated"), False)):
             continue
-
         start_pos = _resolve_x_index(df, sz, ("start_idx", "idx", "bar_index", "start_bar", "time", "timestamp"))
         sub_closes = closes[start_pos:]
-        # Close-based invalidation: a candle closes beyond the zone boundary
         if np.any(sub_closes > t_val) or np.any(sub_closes < b_val):
             continue
         valid_zones.append(sz)
     return valid_zones
 
 
-def _compute_minor_sr_fallback(df: pd.DataFrame, tf_label: str) -> list[dict]:
-    """Local swing minor S/R levels (especially helpful on 15M) when engine returns few/none."""
-    if len(df) < 12:
+def _compute_minor_sr_fallback(df: pd.DataFrame, tf_label: str, min_box_h: float) -> list[dict]:
+    if len(df) < 10:
         return []
     lookback = 3 if tf_label == "15M" else 4
     highs = df["High"].to_numpy(dtype=float)
     lows = df["Low"].to_numpy(dtype=float)
-    atr_proxy = float(np.median(highs - lows)) * 0.35
-    pad = max(atr_proxy, 1e-6)
+    pad = max(min_box_h * 0.6, float(np.median(highs - lows)) * 0.45)
 
     levels: list[dict] = []
     for i in range(lookback, len(df) - lookback):
         if highs[i] == np.max(highs[i - lookback : i + lookback + 1]):
             px = float(highs[i])
-            levels.append({
-                "zone_type": "resistance",
-                "tier": "minor",
-                "start_idx": i,
-                "bottom": px - pad,
-                "top": px + pad,
-            })
+            b, t = _ensure_min_box_height(px - pad, px + pad, min_box_h)
+            levels.append({"zone_type": "resistance", "start_idx": i, "bottom": b, "top": t, "tf": tf_label})
         if lows[i] == np.min(lows[i - lookback : i + lookback + 1]):
             px = float(lows[i])
-            levels.append({
-                "zone_type": "support",
-                "tier": "minor",
-                "start_idx": i,
-                "bottom": px - pad,
-                "top": px + pad,
-            })
-    return levels[-6:]
+            b, t = _ensure_min_box_height(px - pad, px + pad, min_box_h)
+            levels.append({"zone_type": "support", "start_idx": i, "bottom": b, "top": t, "tf": tf_label})
+    return levels[-4:]
 
 
-def _compute_ob_fvg_overlaps_fallback(df: pd.DataFrame) -> list[dict]:
-    """Detects 3-candle FVGs and nearby impulse Order Blocks with overlapping price ranges."""
+def _compute_ob_fvg_overlaps_fallback(df: pd.DataFrame, min_box_h: float) -> list[dict]:
     if len(df) < 5:
         return []
     highs = df["High"].to_numpy(dtype=float)
@@ -213,42 +309,33 @@ def _compute_ob_fvg_overlaps_fallback(df: pd.DataFrame) -> list[dict]:
     obs: list[tuple[int, int, float, float]] = []
 
     for i in range(1, len(df) - 1):
-        # Bullish FVG: low[i+1] > high[i-1]
         if lows[i + 1] > highs[i - 1]:
             fvgs.append((1, i, float(highs[i - 1]), float(lows[i + 1])))
-        # Bearish FVG: high[i+1] < low[i-1]
         if highs[i + 1] < lows[i - 1]:
             fvgs.append((-1, i, float(highs[i + 1]), float(lows[i - 1])))
-
-        # Bullish OB: down candle followed by strong up candle
         if closes[i - 1] < opens[i - 1] and closes[i] > opens[i] and closes[i] > highs[i - 1]:
             obs.append((1, i - 1, float(lows[i - 1]), float(highs[i - 1])))
-        # Bearish OB: up candle followed by strong down candle
         if closes[i - 1] > opens[i - 1] and closes[i] < opens[i] and closes[i] < lows[i - 1]:
             obs.append((-1, i - 1, float(lows[i - 1]), float(highs[i - 1])))
 
     overlaps: list[dict] = []
-    for f_dir, f_idx, f_bot, f_top in fvgs[-12:]:
-        for o_dir, o_idx, o_bot, o_top in obs[-12:]:
+    for f_dir, f_idx, f_bot, f_top in fvgs[-10:]:
+        for o_dir, o_idx, o_bot, o_top in obs[-10:]:
             if f_dir == o_dir and abs(f_idx - o_idx) <= 8:
                 ov_bot = max(f_bot, o_bot)
                 ov_top = min(f_top, o_top)
                 if ov_top > ov_bot:
+                    b, t = _ensure_min_box_height(ov_bot, ov_top, min_box_h * 1.2)
                     overlaps.append({
                         "direction": f_dir,
                         "ob_start_idx": min(f_idx, o_idx),
-                        "ob_low": o_bot,
-                        "ob_high": o_top,
-                        "fvg_low": f_bot,
-                        "fvg_high": f_top,
-                        "overlap_low": ov_bot,
-                        "overlap_high": ov_top,
+                        "overlap_low": b,
+                        "overlap_high": t,
                     })
-    return overlaps[-5:]
+    return overlaps[-3:]
 
 
 def _compute_bos_fallback(df: pd.DataFrame) -> list[tuple[object, object, float, str]]:
-    """Returns (x0, x1, price, label) for recent Break of Structure events on candle close."""
     if len(df) < 10:
         return []
     swing_n = 3
@@ -275,7 +362,7 @@ def _compute_bos_fallback(df: pd.DataFrame) -> list[tuple[object, object, float,
             bos_events.append((idx[last_swing_low[0]], idx[i], last_swing_low[1], "BOS ↓"))
             last_swing_low = None
 
-    return bos_events[-6:]
+    return bos_events[-4:]
 
 
 def build_chart(
@@ -295,6 +382,9 @@ def build_chart(
         fig.update_layout(title=f"{title} (No data)", template="plotly_dark", height=540)
         return fig
 
+    price_range = max(float(df["High"].max() - df["Low"].min()), 1e-6)
+    min_box_h = price_range * 0.014  # Ensures boxes are clearly visible, never thin lines
+
     fig.add_trace(
         go.Candlestick(
             x=df.index,
@@ -307,39 +397,66 @@ def build_chart(
     )
 
     x_end = df.index[-1]
+    used_label_prices: list[float] = []
 
-    # 1. Major / Active S&R zones (invalidated strictly by candle close)
+    def _can_place_label(y_val: float) -> bool:
+        min_sep = price_range * 0.035
+        if any(abs(y_val - prev_y) < min_sep for prev_y in used_label_prices):
+            return False
+        used_label_prices.append(y_val)
+        return True
+
+    # 1. Major / Active S&R boxes (invalidated by candle close, TF written on box)
     active_sr = _filter_close_invalidated_sr(df, sr_zones)
-    for sz in active_sr[-6:]:
+    for sz in active_sr[-4:]:
         zone_type = str(_get_val(sz, ("zone_type", "kind", "side"), "support")).lower()
         is_sup = "sup" in zone_type or "demand" in zone_type or "bull" in zone_type
-        fill_c = "rgba(46, 204, 113, 0.16)" if is_sup else "rgba(231, 76, 60, 0.16)"
-        line_c = "rgba(46, 204, 113, 0.85)" if is_sup else "rgba(231, 76, 60, 0.85)"
+        fill_c = "rgba(46, 204, 113, 0.22)" if is_sup else "rgba(231, 76, 60, 0.22)"
+        line_c = "rgba(46, 204, 113, 0.90)" if is_sup else "rgba(231, 76, 60, 0.90)"
+
         pos = _resolve_x_index(df, sz, ("start_idx", "idx", "bar_index", "start_bar", "time", "timestamp"))
+        raw_b = float(_get_val(sz, ("bottom", "low"), 0.0))
+        raw_t = float(_get_val(sz, ("top", "high"), 0.0))
+        box_b, box_t = _ensure_min_box_height(raw_b, raw_t, min_box_h)
+        z_tf = str(_get_val(sz, ("tf", "timeframe"), tf_label))
+
         fig.add_shape(
             type="rect",
             x0=df.index[pos],
             x1=x_end,
-            y0=float(_get_val(sz, ("bottom", "low"), 0.0)),
-            y1=float(_get_val(sz, ("top", "high"), 0.0)),
+            y0=box_b,
+            y1=box_t,
             fillcolor=fill_c,
-            line=dict(color=line_c, width=1.2),
+            line=dict(color=line_c, width=1.5),
         )
+        mid_y = (box_b + box_t) / 2.0
+        if _can_place_label(mid_y):
+            fig.add_annotation(
+                x=x_end,
+                y=mid_y,
+                text=f"{'SUP' if is_sup else 'RES'} [{z_tf}]",
+                showarrow=False,
+                xanchor="left",
+                font=dict(size=10, color=line_c),
+            )
 
-    # 2. Minor S&R zones (always includes 15M minor levels when enabled)
+    # 2. Minor S&R boxes (including 15M, with TF written on box)
     if show_minor_sr:
         combined_minor = list(minor_sr_zones or [])
         if not combined_minor:
-            combined_minor = _compute_minor_sr_fallback(df, tf_label)
+            combined_minor = _compute_minor_sr_fallback(df, tf_label, min_box_h)
         active_minor = _filter_close_invalidated_sr(df, combined_minor)
-        for mz in active_minor[-6:]:
+        for mz in active_minor[-4:]:
             z_type = str(_get_val(mz, ("zone_type", "kind", "side"), "support")).lower()
             is_sup = "sup" in z_type or "demand" in z_type
-            m_fill = "rgba(88, 214, 141, 0.10)" if is_sup else "rgba(241, 148, 138, 0.10)"
-            m_line = "rgba(88, 214, 141, 0.65)" if is_sup else "rgba(241, 148, 138, 0.65)"
+            m_fill = "rgba(26, 188, 156, 0.16)" if is_sup else "rgba(243, 156, 18, 0.16)"
+            m_line = "rgba(72, 201, 176, 0.85)" if is_sup else "rgba(245, 176, 65, 0.85)"
             m_pos = _resolve_x_index(df, mz, ("start_idx", "idx", "bar_index", "start_bar", "time", "timestamp"))
-            m_bot = float(_get_val(mz, ("bottom", "low"), 0.0))
-            m_top = float(_get_val(mz, ("top", "high"), 0.0))
+            raw_mb = float(_get_val(mz, ("bottom", "low"), 0.0))
+            raw_mt = float(_get_val(mz, ("top", "high"), 0.0))
+            m_bot, m_top = _ensure_min_box_height(raw_mb, raw_mt, min_box_h)
+            m_tf = str(_get_val(mz, ("tf", "timeframe"), tf_label))
+
             fig.add_shape(
                 type="rect",
                 x0=df.index[m_pos],
@@ -347,39 +464,41 @@ def build_chart(
                 y0=m_bot,
                 y1=m_top,
                 fillcolor=m_fill,
-                line=dict(color=m_line, width=1, dash="dash"),
+                line=dict(color=m_line, width=1.2, dash="dash"),
             )
-            fig.add_annotation(
-                x=x_end,
-                y=(m_bot + m_top) / 2.0,
-                text=f"Minor {'S' if is_sup else 'R'} ({tf_label})",
-                showarrow=False,
-                xanchor="left",
-                font=dict(size=10, color=m_line),
-            )
+            m_mid = (m_bot + m_top) / 2.0
+            if _can_place_label(m_mid):
+                fig.add_annotation(
+                    x=x_end,
+                    y=m_mid,
+                    text=f"Minor {'S' if is_sup else 'R'} [{m_tf}]",
+                    showarrow=False,
+                    xanchor="left",
+                    font=dict(size=10, color=m_line),
+                )
 
-    # 3. OB + FVG Overlap zones
+    # 3. OB + FVG Overlap boxes (sized clearly as boxes with TF label)
     if show_ob_fvg_overlap:
         overlaps = list(paired_zones or [])
         if not overlaps:
-            overlaps = _compute_ob_fvg_overlaps_fallback(df)
-        for pz in overlaps[-5:]:
+            overlaps = _compute_ob_fvg_overlaps_fallback(df, min_box_h)
+        for pz in overlaps[-3:]:
             direction = int(_get_val(pz, ("direction",), 1))
-            fill_c = "rgba(52, 152, 219, 0.20)" if direction >= 0 else "rgba(155, 89, 182, 0.20)"
-            line_c = "rgba(93, 173, 226, 0.9)" if direction >= 0 else "rgba(187, 143, 206, 0.9)"
+            fill_c = "rgba(52, 152, 219, 0.24)" if direction >= 0 else "rgba(155, 89, 182, 0.24)"
+            line_c = "rgba(93, 173, 226, 0.95)" if direction >= 0 else "rgba(187, 143, 206, 0.95)"
 
             ov_low = _get_val(pz, ("overlap_low",))
             ov_high = _get_val(pz, ("overlap_high",))
-            if ov_low is not None and ov_high is not None and float(ov_high) > float(ov_low):
-                y_low, y_high = float(ov_low), float(ov_high)
-                tag_txt = "OB+FVG Overlap"
+            if ov_low is not None and ov_high is not None:
+                y_low, y_high = _ensure_min_box_height(float(ov_low), float(ov_high), min_box_h * 1.25)
+                tag_txt = f"OB+FVG [{tf_label}]"
             else:
                 ob_l = float(_get_val(pz, ("ob_low", "bottom"), 0.0))
                 ob_h = float(_get_val(pz, ("ob_high", "top"), 0.0))
                 fvg_l = float(_get_val(pz, ("fvg_low", "bottom"), ob_l))
                 fvg_h = float(_get_val(pz, ("fvg_high", "top"), ob_h))
-                y_low, y_high = min(ob_l, fvg_l), max(ob_h, fvg_h)
-                tag_txt = "OB/FVG Zone"
+                y_low, y_high = _ensure_min_box_height(min(ob_l, fvg_l), max(ob_h, fvg_h), min_box_h * 1.25)
+                tag_txt = f"OB/FVG [{tf_label}]"
 
             pos = _resolve_x_index(df, pz, ("ob_start_idx", "start_idx", "idx", "bar_index", "time", "timestamp"))
             fig.add_shape(
@@ -389,60 +508,59 @@ def build_chart(
                 y0=y_low,
                 y1=y_high,
                 fillcolor=fill_c,
-                line=dict(color=line_c, width=1.2, dash="dot"),
+                line=dict(color=line_c, width=1.5),
             )
-            fig.add_annotation(
-                x=df.index[pos],
-                y=y_high,
-                text=tag_txt,
-                showarrow=False,
-                yshift=10,
-                font=dict(size=10, color=line_c),
-            )
+            ov_mid = (y_low + y_high) / 2.0
+            if _can_place_label(ov_mid):
+                fig.add_annotation(
+                    x=df.index[pos],
+                    y=y_high,
+                    text=tag_txt,
+                    showarrow=False,
+                    xanchor="left",
+                    yanchor="bottom",
+                    font=dict(size=10, color=line_c),
+                )
 
-    # 4. Break of Structure (BOS) lines & labels
+    # 4. Break of Structure (BOS) lines & non-overlapping labels
     if show_bos:
-        bos_plotted = 0
+        bos_items: list[tuple[object, object, float, str]] = []
         if sig_df is not None and not sig_df.empty and "bos_level" in sig_df.columns:
-            bos_rows = sig_df[sig_df["bos_level"].notna()].tail(6)
+            bos_rows = sig_df[sig_df["bos_level"].notna()].tail(4)
             for idx_pos, row in bos_rows.iterrows():
                 if idx_pos in df.index:
-                    lvl = float(row["bos_level"])
-                    fig.add_trace(
-                        go.Scatter(
-                            x=[idx_pos, x_end],
-                            y=[lvl, lvl],
-                            mode="lines+text",
-                            text=["", "BOS"],
-                            textposition="top right",
-                            line=dict(color="#F5B041", dash="dash", width=1.2),
-                            name="BOS",
-                            showlegend=False,
-                        )
-                    )
-                    bos_plotted += 1
+                    bos_items.append((idx_pos, x_end, float(row["bos_level"]), f"BOS [{tf_label}]"))
+        if not bos_items:
+            bos_items = [(xs, xb, lvl, f"{lbl} [{tf_label}]") for xs, xb, lvl, lbl in _compute_bos_fallback(df)]
 
-        if bos_plotted == 0:
-            for x_start, x_brk, lvl, lbl in _compute_bos_fallback(df):
-                fig.add_trace(
-                    go.Scatter(
-                        x=[x_start, x_brk],
-                        y=[lvl, lvl],
-                        mode="lines+text",
-                        text=["", lbl],
-                        textposition="top right",
-                        line=dict(color="#F5B041", dash="dash", width=1.2),
-                        name="BOS",
-                        showlegend=False,
-                    )
+        for x_start, x_brk, lvl, lbl in bos_items[-3:]:
+            fig.add_trace(
+                go.Scatter(
+                    x=[x_start, x_brk],
+                    y=[lvl, lvl],
+                    mode="lines",
+                    line=dict(color="#F7DC6F", dash="dash", width=1.2),
+                    name="BOS",
+                    showlegend=False,
+                )
+            )
+            if _can_place_label(lvl):
+                fig.add_annotation(
+                    x=x_brk,
+                    y=lvl,
+                    text=lbl,
+                    showarrow=False,
+                    xanchor="right",
+                    yanchor="bottom",
+                    font=dict(size=10, color="#F7DC6F"),
                 )
 
     fig.update_layout(
         title=title,
         template="plotly_dark",
         xaxis_rangeslider_visible=False,
-        height=550,
-        margin=dict(l=10, r=70, t=42, b=10),
+        height=560,
+        margin=dict(l=10, r=95, t=42, b=10),
     )
     return fig
 
@@ -486,20 +604,25 @@ def main() -> None:
         st.write(f"Signed in as **{user}**")
         if st.button("Sign Out"):
             st.session_state.pop("auth_user", None)
+            if hasattr(st, "logout"):
+                try:
+                    st.logout()
+                except Exception:
+                    pass
             st.rerun()
 
         st.divider()
         asset_name = st.selectbox("Market", list(WATCHLIST.keys()), index=0)
         symbol = WATCHLIST[asset_name]
-        tf_label = st.selectbox("Chart Timeframe", list(TF_CONFIG.keys()), index=1 if "15M" in TF_CONFIG else 0)
+        tf_label = st.selectbox("Chart Timeframe", list(TF_CONFIG.keys()), index=1)
         rr_target = st.slider("Target R:R", min_value=2.0, max_value=15.0, value=5.0, step=0.5)
         risk_pct = st.slider("Risk per Trade (%)", min_value=0.5, max_value=5.0, value=2.0, step=0.5)
 
         st.divider()
         st.caption("Chart Layers")
-        show_minor_sr = st.checkbox("Minor S/R Levels (incl. 15M)", value=True)
+        show_minor_sr = st.checkbox("Minor S/R Boxes (incl. 15M)", value=True)
         show_bos = st.checkbox("Break of Structure (BOS)", value=True)
-        show_ob_fvg_overlap = st.checkbox("OB + FVG Overlaps", value=True)
+        show_ob_fvg_overlap = st.checkbox("OB + FVG Overlap Boxes", value=True)
 
     st.title(f"DESTINY AI — {asset_name} ({symbol})")
 
