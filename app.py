@@ -1615,3 +1615,281 @@ def display_historical_review(frames, analyses):
     display_historical_candle_details(
         frames,
     )
+# =========================================================
+# PART 6 — MAIN DESTINY AI DASHBOARD
+# =========================================================
+
+st.title("DESTINY AI")
+st.caption(
+    "Historical market analysis | Multi-timeframe review | "
+    "Virtual practice"
+)
+
+# ---------------------------------------------------------
+# MARKET SELECTION
+# ---------------------------------------------------------
+
+market_col, asset_col, timeframe_col = st.columns(3)
+
+with market_col:
+    market_type = st.selectbox(
+        "Market",
+        list(MARKETS.keys()),
+        key="market_type",
+    )
+
+with asset_col:
+    asset_name = st.selectbox(
+        "Asset",
+        list(MARKETS[market_type].keys()),
+        key=f"asset_{market_type}",
+    )
+
+with timeframe_col:
+    selected_timeframe = st.selectbox(
+        "Chart timeframe",
+        TIMEFRAMES,
+        index=2,
+        key="selected_timeframe",
+    )
+
+symbol = MARKETS[market_type][asset_name]
+
+st.caption(
+    f"Selected market: {market_type} | "
+    f"Asset: {asset_name} | Symbol: {symbol}"
+)
+
+# ---------------------------------------------------------
+# LOAD HISTORICAL DATA
+# ---------------------------------------------------------
+
+refresh_col, status_col = st.columns([1, 3])
+
+with refresh_col:
+    if st.button(
+        "Refresh Historical Data",
+        use_container_width=True,
+    ):
+        st.cache_data.clear()
+        st.rerun()
+
+with status_col:
+    st.caption(
+        "Data is retrieved from Yahoo Finance. "
+        "Availability and historical coverage vary by market."
+    )
+
+with st.spinner("Loading historical market data..."):
+    frames = load_all_timeframes(symbol)
+
+selected_data = frames.get(
+    selected_timeframe,
+    pd.DataFrame(),
+)
+
+if selected_data.empty:
+    st.error(
+        f"No historical candles are available for "
+        f"{asset_name} on {selected_timeframe}."
+    )
+    st.stop()
+
+# ---------------------------------------------------------
+# RUN HISTORICAL ANALYSIS
+# ---------------------------------------------------------
+
+with st.spinner("Reviewing historical market structure..."):
+    analyses = run_all_analyses(frames)
+
+selected_result = analyses.get(
+    selected_timeframe,
+    {},
+)
+
+if selected_result.get("status") != "ANALYSED":
+    st.warning(
+        selected_result.get(
+            "error",
+            "Historical analysis could not be completed.",
+        )
+    )
+    selected_result = {}
+
+result_data = selected_result.get(
+    "data",
+    {},
+)
+
+if not isinstance(result_data, dict):
+    result_data = {}
+
+# ---------------------------------------------------------
+# SUPPORT AND RESISTANCE
+# ---------------------------------------------------------
+
+with st.spinner("Loading historical support and resistance..."):
+    sr_zones = build_combined_sr(frames)
+
+st.subheader("Support and Resistance")
+
+if isinstance(sr_zones, pd.DataFrame) and not sr_zones.empty:
+    display_columns = [
+        column
+        for column in [
+            "Source Timeframe",
+            "Classification",
+            "Side",
+            "Zone Low",
+            "Zone High",
+            "Confirmed Time",
+        ]
+        if column in sr_zones.columns
+    ]
+
+    st.dataframe(
+        sr_zones[display_columns],
+        use_container_width=True,
+        hide_index=True,
+    )
+else:
+    st.info(
+        "No confirmed support or resistance zones "
+        "are available in the selected historical data."
+    )
+
+# ---------------------------------------------------------
+# MAIN PRICE CHART
+# ---------------------------------------------------------
+
+st.divider()
+st.header("Historical Price Chart")
+
+display_chart(
+    selected_data,
+    result_data,
+    sr_zones,
+    asset_name,
+    selected_timeframe,
+)
+
+# ---------------------------------------------------------
+# MULTI-TIMEFRAME CONTEXT
+# ---------------------------------------------------------
+
+st.divider()
+st.header("Multi-Timeframe Context")
+
+try:
+    mtf_result = build_mtf_context(frames)
+
+    if isinstance(mtf_result, pd.DataFrame):
+        if not mtf_result.empty:
+            st.dataframe(
+                mtf_result,
+                use_container_width=True,
+                hide_index=True,
+            )
+        else:
+            st.info(
+                "No multi-timeframe context is available."
+            )
+
+    elif isinstance(mtf_result, dict):
+        st.json(mtf_result)
+
+    else:
+        st.info(
+            "The multi-timeframe module returned "
+            "an unsupported result format."
+        )
+
+except Exception as exc:
+    st.warning(
+        f"Multi-timeframe context unavailable: {exc}"
+    )
+
+# ---------------------------------------------------------
+# HISTORICAL REVIEW
+# ---------------------------------------------------------
+
+st.divider()
+
+display_historical_review(
+    frames,
+    analyses,
+)
+
+# ---------------------------------------------------------
+# VIRTUAL ACCOUNT
+# ---------------------------------------------------------
+
+st.divider()
+st.header("Virtual Practice Account")
+
+try:
+    account = load_account(
+        supabase,
+        user_id,
+    )
+
+    balance = float(
+        account.get("balance", 0)
+    )
+
+    transactions = account.get(
+        "transactions",
+        [],
+    )
+
+    account_col, transaction_col = st.columns(2)
+
+    with account_col:
+        st.metric(
+            "Virtual Balance",
+            f"{balance:,.2f}",
+        )
+
+    with transaction_col:
+        st.metric(
+            "Recorded Virtual Transactions",
+            len(transactions),
+        )
+
+    if transactions:
+        st.subheader("Virtual Transaction History")
+
+        transaction_frame = pd.DataFrame(
+            transactions
+        )
+
+        st.dataframe(
+            transaction_frame,
+            use_container_width=True,
+            hide_index=True,
+        )
+    else:
+        st.info(
+            "No virtual transactions have been recorded yet."
+        )
+
+except Exception as exc:
+    st.warning(
+        f"Virtual account information unavailable: {exc}"
+    )
+
+# ---------------------------------------------------------
+# FOOTER
+# ---------------------------------------------------------
+
+st.divider()
+
+st.caption(
+    "DESTINY AI | Historical analysis and virtual review"
+)
+
+st.caption(
+    "Historical data may contain delays, gaps, or "
+    "provider-specific limitations. Virtual results "
+    "are simulations and are not actual financial results."
+        )
