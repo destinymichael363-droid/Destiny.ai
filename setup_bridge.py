@@ -1,14 +1,16 @@
 
 # =========================================================
-# DESTINY AI — SETUP BRIDGE
-# Historical Analysis Record Management
+# DESTINY AI — HISTORICAL SETUP BRIDGE
+# Validates, normalizes and identifies historical records.
+# No broker integration or order execution.
 # =========================================================
 
 from __future__ import annotations
 
 import hashlib
-import json
+import math
 from datetime import datetime, timezone
+
 
 REQUIRED_FIELDS = [
     "direction",
@@ -22,85 +24,158 @@ REQUIRED_FIELDS = [
     "status",
 ]
 
+VALID_DIRECTIONS = {"BULLISH", "BEARISH"}
+VALID_STATUSES = {"ACTIVE", "INVALIDATED"}
+
+
+# =========================================================
+# SAFE VALUE HANDLING
+# =========================================================
+
+def is_missing(value):
+    if value is None:
+        return True
+
+    try:
+        if value != value:
+            return True
+    except Exception:
+        pass
+
+    text = str(value).strip().lower()
+
+    return text in {"", "none", "nan", "nat", "null"}
+
 
 def normalize_time(value):
-    """Convert timestamps into a consistent ISO format."""
-
-    if value is None:
+    if is_missing(value):
         return None
 
     try:
-        if hasattr(value, "isoformat"):
-            return value.isoformat()
+        if hasattr(value, "to_pydatetime"):
+            value = value.to_pydatetime()
 
-        return str(value)
+        if isinstance(value, datetime):
+            if value.tzinfo is None:
+                value = value.replace(tzinfo=timezone.utc)
 
-    except Exception:
+            return value.astimezone(timezone.utc).isoformat()
+
+        text = str(value).strip()
+
+        parsed = datetime.fromisoformat(
+            text.replace("Z", "+00:00")
+        )
+
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+
+        return parsed.astimezone(timezone.utc).isoformat()
+
+    except (ValueError, TypeError, OverflowError):
         return None
 
 
+def safe_float(value):
+    if is_missing(value):
+        return None
+
+    try:
+        number = float(value)
+
+        if not math.isfinite(number):
+            return None
+
+        return number
+
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+# =========================================================
+# UNIQUE HISTORICAL RECORD ID
+# =========================================================
+
 def create_setup_id(symbol, timeframe, setup):
-    """Create a stable identifier for a historical setup."""
+    normalized_times = [
+        normalize_time(setup.get("bos_time")),
+        normalize_time(setup.get("ob_time")),
+        normalize_time(setup.get("fvg_time")),
+    ]
 
     raw = "|".join([
         str(symbol).upper().strip(),
         str(timeframe).upper().strip(),
-        str(setup.get("direction", "")),
-        normalize_time(setup.get("bos_time")) or "",
-        normalize_time(setup.get("ob_time")) or "",
-        normalize_time(setup.get("fvg_time")) or "",
+        str(setup.get("direction", "")).upper().strip(),
+        *[value or "" for value in normalized_times],
     ])
 
     return hashlib.sha256(
         raw.encode("utf-8")
-    ).hexdigest()[:20]
+    ).hexdigest()[:24]
 
+
+# =========================================================
+# HISTORICAL RECORD VALIDATION
+# =========================================================
 
 def validate_setup(setup):
-    """Check whether the analysis record is structurally valid."""
-
     if not isinstance(setup, dict):
         return False, "Setup must be a dictionary."
 
     missing = [
-        field for field in REQUIRED_FIELDS
-        if field not in setup
+        field
+        for field in REQUIRED_FIELDS
+        if field not in setup or is_missing(setup.get(field))
     ]
 
     if missing:
-        return False, f"Missing fields: {', '.join(missing)}"
+        return False, (
+            "Missing required fields: "
+            + ", ".join(missing)
+        )
 
-    if setup["direction"] not in ("BULLISH", "BEARISH"):
-        return False, "Invalid direction field."
+    direction = str(
+        setup["direction"]
+    ).strip().upper()
 
-    if setup["status"] not in ("ACTIVE", "INVALIDATED"):
-        return False, "Invalid status field."
+    status = str(
+        setup["status"]
+    ).strip().upper()
 
-    try:
-        ob_high = float(setup["ob_high"])
-        ob_low = float(setup["ob_low"])
-        fvg_high = float(setup["fvg_high"])
-        fvg_low = float(setup["fvg_low"])
+    if direction not in VALID_DIRECTIONS:
+        return False, "Invalid direction."
 
-        if ob_high <= ob_low:
-            return False, "Invalid OB price range."
+    if status not in VALID_STATUSES:
+        return False, "Invalid historical status."
 
-        if fvg_high <= fvg_low:
-            return False, "Invalid FVG price range."
+    ob_high = safe_float(setup["ob_high"])
+    ob_low = safe_float(setup["ob_low"])
 
-    except (TypeError, ValueError):
-        return False, "Invalid price values."
+    fvg_high = safe_float(setup["fvg_high"])
+    fvg_low = safe_float(setup["fvg_low"])
+
+    if None in (ob_high, ob_low, fvg_high, fvg_low):
+        return False, "Invalid or non-finite price values."
+
+    if ob_high <= ob_low:
+        return False, "Invalid OB price range."
+
+    if fvg_high <= fvg_low:
+        return False, "Invalid FVG price range."
 
     for field in ("bos_time", "ob_time", "fvg_time"):
-        if setup.get(field) is None:
-            return False, f"Missing timestamp: {field}"
+        if normalize_time(setup.get(field)) is None:
+            return False, f"Invalid timestamp: {field}"
 
-    return True, "Valid setup."
+    return True, "Valid historical record."
 
+
+# =========================================================
+# RECORD PREPARATION
+# =========================================================
 
 def prepare_setup(symbol, timeframe, setup):
-    """Validate and prepare an analysis record."""
-
     valid, message = validate_setup(setup)
 
     if not valid:
@@ -110,13 +185,45 @@ def prepare_setup(symbol, timeframe, setup):
 
     record["symbol"] = str(symbol).upper().strip()
     record["timeframe"] = str(timeframe).upper().strip()
+    record["direction"] = str(
+        record["direction"]
+    ).upper().strip()
+    record["status"] = str(
+        record["status"]
+    ).upper().strip()
 
-    record["bos_time"] = normalize_time(record["bos_time"])
-    record["ob_time"] = normalize_time(record["ob_time"])
-    record["fvg_time"] = normalize_time(record["fvg_time"])
+    record["bos_time"] = normalize_time(
+        record["bos_time"]
+    )
+
+    record["ob_time"] = normalize_time(
+        record["ob_time"]
+    )
+
+    record["fvg_time"] = normalize_time(
+        record["fvg_time"]
+    )
+
+    record["ob_high"] = safe_float(
+        record["ob_high"]
+    )
+
+    record["ob_low"] = safe_float(
+        record["ob_low"]
+    )
+
+    record["fvg_high"] = safe_float(
+        record["fvg_high"]
+    )
+
+    record["fvg_low"] = safe_float(
+        record["fvg_low"]
+    )
 
     record["setup_id"] = create_setup_id(
-        symbol, timeframe, record
+        symbol,
+        timeframe,
+        record
     )
 
     record["recorded_at"] = datetime.now(
@@ -126,58 +233,61 @@ def prepare_setup(symbol, timeframe, setup):
     record["record_type"] = "HISTORICAL_ANALYSIS"
     record["simulation_only"] = True
 
-    return record, "Setup prepared successfully."
+    return record, "Record prepared successfully."
 
 
-def register_setups(symbol, timeframe, setups, existing_ids=None):
-    """Prepare setups while preventing duplicate records."""
+# =========================================================
+# REGISTER AND FILTER HISTORICAL RECORDS
+# =========================================================
 
+def register_setups(
+    symbol,
+    timeframe,
+    setups,
+    existing_ids=None
+):
     if existing_ids is None:
         existing_ids = set()
+    else:
+        existing_ids = set(existing_ids)
 
     registered = []
     rejected = []
     duplicates = []
 
-    for setup in setups:
+    received = 0
 
-        result, message = prepare_setup(
-            symbol, timeframe, setup
+    for setup in setups:
+        received += 1
+
+        record, message = prepare_setup(
+            symbol,
+            timeframe,
+            setup
         )
 
-        if result is None:
+        if record is None:
             rejected.append({
                 "setup": setup,
-                "reason": message,
+                "reason": message
             })
             continue
 
-        setup_id = result["setup_id"]
+        setup_id = record["setup_id"]
 
         if setup_id in existing_ids:
             duplicates.append(setup_id)
             continue
 
         existing_ids.add(setup_id)
-        registered.append(result)
+        registered.append(record)
 
     return {
         "registered": registered,
         "rejected": rejected,
         "duplicates": duplicates,
-        "total_received": len(setups),
+        "total_received": received,
         "total_registered": len(registered),
         "total_rejected": len(rejected),
         "total_duplicates": len(duplicates),
     }
-
-
-def export_setup_records(records):
-    """Convert records into JSON-safe text."""
-
-    return json.dumps(
-        records,
-        indent=2,
-        default=str
-    )
-
