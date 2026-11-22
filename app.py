@@ -1,5 +1,5 @@
 from __future__ import annotations
-
+from setup_bridge import register_setups
 from datetime import datetime, timezone
 import urllib.request
 
