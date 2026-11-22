@@ -107,6 +107,42 @@ def render_auth_gate() -> bool:
 
 
 def build_chart(df: pd.DataFrame, title: str, sr_zones: list, paired_zones: list, sig_df: pd.DataFrame) -> go.Figure:
+def _resolve_x_index(df: pd.DataFrame, obj: object, attr_names: tuple[str, ...]) -> int:
+    if df.empty:
+        return 0
+
+    raw_val = None
+    for name in attr_names:
+        if hasattr(obj, name):
+            raw_val = getattr(obj, name)
+            break
+
+    if raw_val is None:
+        return 0
+
+    # If it's already an integer bar position
+    if isinstance(raw_val, (int, float)) and not isinstance(raw_val, bool):
+        pos = int(raw_val)
+        return max(0, min(pos, len(df) - 1))
+
+    # If it's a timestamp / index value, match nearest bar in df.index
+    try:
+        idx_loc = df.index.get_indexer([raw_val], method="nearest")[0]
+        if idx_loc >= 0:
+            return max(0, min(int(idx_loc), len(df) - 1))
+    except Exception:
+        pass
+
+    return 0
+
+
+def build_chart(
+    df: pd.DataFrame,
+    title: str,
+    sr_zones: list,
+    paired_zones: list,
+    sig_df: pd.DataFrame,
+) -> go.Figure:
     fig = go.Figure()
     if df.empty:
         fig.update_layout(title=f"{title} (No data)", template="plotly_dark", height=500)
@@ -122,6 +158,74 @@ def build_chart(df: pd.DataFrame, title: str, sr_zones: list, paired_zones: list
             name="Price",
         )
     )
+
+    x_end = df.index[-1]
+
+    # Support & Resistance zones (safe attribute lookup)
+    for sz in (sr_zones or [])[-6:]:
+        zone_type = str(getattr(sz, "zone_type", "support")).lower()
+        is_support = zone_type == "support"
+        fill_c = "rgba(46, 204, 113, 0.16)" if is_support else "rgba(231, 76, 60, 0.16)"
+        line_c = "rgba(46, 204, 113, 0.75)" if is_support else "rgba(231, 76, 60, 0.75)"
+
+        pos = _resolve_x_index(df, sz, ("start_idx", "idx", "bar_index", "start_bar", "time", "timestamp"))
+        fig.add_shape(
+            type="rect",
+            x0=df.index[pos],
+            x1=x_end,
+            y0=float(sz.bottom),
+            y1=float(sz.top),
+            fillcolor=fill_c,
+            line=dict(color=line_c, width=1),
+        )
+
+    # Paired OB + FVG zones (safe attribute lookup)
+    for pz in (paired_zones or [])[-6:]:
+        direction = int(getattr(pz, "direction", 1))
+        fill_c = "rgba(52, 152, 219, 0.16)" if direction == 1 else "rgba(155, 89, 182, 0.16)"
+        line_c = "rgba(52, 152, 219, 0.75)" if direction == 1 else "rgba(155, 89, 182, 0.75)"
+
+        y_low = min(float(pz.ob_low), float(pz.fvg_low))
+        y_high = max(float(pz.ob_high), float(pz.fvg_high))
+        pos = _resolve_x_index(df, pz, ("ob_start_idx", "start_idx", "idx", "bar_index", "time", "timestamp"))
+
+        fig.add_shape(
+            type="rect",
+            x0=df.index[pos],
+            x1=x_end,
+            y0=y_low,
+            y1=y_high,
+            fillcolor=fill_c,
+            line=dict(color=line_c, width=1, dash="dot"),
+        )
+
+    # Break of Structure (BOS) lines
+    if sig_df is not None and not sig_df.empty and "bos_level" in sig_df.columns:
+        bos_rows = sig_df[sig_df["bos_level"].notna()].tail(6)
+        for idx_pos, row in bos_rows.iterrows():
+            if idx_pos in df.index:
+                fig.add_trace(
+                    go.Scatter(
+                        x=[idx_pos, x_end],
+                        y=[float(row["bos_level"]), float(row["bos_level"])],
+                        mode="lines",
+                        line=dict(dash="dash", width=1),
+                        name="BOS",
+                        showlegend=False,
+                    )
+                )
+
+    fig.update_layout(
+        title=title,
+        template="plotly_dark",
+        xaxis_rangeslider_visible=False,
+        height=520,
+        margin=dict(l=10, r=10, t=40, b=10),
+    )
+    return fig
+
+        ))
+   )
 
     x_end = df.index[-1]
 
