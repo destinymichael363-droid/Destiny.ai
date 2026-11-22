@@ -9,12 +9,14 @@ from pathlib import Path
 import pandas as pd
 import yfinance as yf
 
+from broker_execution import ExecutionConfig, execute_order_guarded, load_execution_config, validate_and_size_order
 from mtf_runner import run_closed_candle_5tf_cascade
 from notifications import NotificationCenter
 
 
 DATA_DIR = Path("data")
 SEEN_FILE = DATA_DIR / "seen_worker_alerts.json"
+STATE_FILE = DATA_DIR / "worker_state.json"
 
 DEFAULT_WATCHLIST: dict[str, str] = {
     "Bitcoin": "BTC-USD",
@@ -62,8 +64,7 @@ def _clean_df(frame: pd.DataFrame | None) -> pd.DataFrame:
 
 def _fetch_yf(symbol: str, interval: str, period: str) -> pd.DataFrame:
     try:
-        ticker = yf.Ticker(symbol)
-        raw = ticker.history(
+        raw = yf.Ticker(symbol).history(
             period=period,
             interval=interval,
             auto_adjust=False,
@@ -121,9 +122,35 @@ def save_seen_ids(seen_ids: set[str]) -> None:
     SEEN_FILE.write_text(json.dumps(trimmed, indent=2), encoding="utf-8")
 
 
+def load_existing_signals() -> list[dict]:
+    if not STATE_FILE.exists():
+        return []
+    try:
+        payload = json.loads(STATE_FILE.read_text(encoding="utf-8"))
+        sigs = payload.get("signals", [])
+        return sigs if isinstance(sigs, list) else []
+    except Exception:
+        return []
+
+
+def write_worker_state(signals: list[dict], new_alerts_count: int, status: str = "running") -> None:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "status": status,
+        "updated_utc": datetime.now(timezone.utc).isoformat(),
+        "new_alerts_last_run": new_alerts_count,
+        "signals": signals[-30:],
+    }
+    tmp_path = STATE_FILE.with_suffix(".tmp")
+    tmp_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    tmp_path.replace(STATE_FILE)
+
+
 def run_once(
     notifier: NotificationCenter,
     seen_ids: set[str],
+    signals_history: list[dict],
+    exec_cfg: ExecutionConfig,
     rr_target: float = 5.0,
     tg_token: str = "",
     tg_chat_id: str = "",
@@ -136,14 +163,13 @@ def run_once(
         if df_1m is None or len(df_1m) < 2:
             continue
 
-        # Latest closed candle stamp (iloc[-2] is the last completed bar)
         closed_stamp = str(df_1m.index[-2])
         mtf_out = run_closed_candle_5tf_cascade(frames, rr_target=rr_target)
         sig = mtf_out.get("scalp_signal")
 
         if sig is not None:
-            event_id = f"worker_scalp_{symbol}_{sig.direction}_{sig.entry_price}_{closed_stamp}"
-            if event_id not in seen_ids:
+            alert_key = f"worker_scalp_{symbol}_{sig.direction}_{sig.entry_price}_{closed_stamp}"
+            if alert_key not in seen_ids:
                 title = f"{asset_name} ({symbol}) {sig.direction} — {sig.confidence}"
                 detail = (
                     f"Closed Bar: {closed_stamp} | "
@@ -153,7 +179,7 @@ def run_once(
                     f"HTF: {sig.htf_zone_summary} -> LTF: {sig.ltf_overlap_summary}"
                 )
                 pushed = notifier.push(
-                    event_id=event_id,
+                    event_id=alert_key,
                     category="SCALP_SIGNAL",
                     title=title,
                     detail=detail,
@@ -161,10 +187,52 @@ def run_once(
                     telegram_chat_id=tg_chat_id,
                 )
                 if pushed:
-                    seen_ids.add(event_id)
+                    seen_ids.add(alert_key)
                     new_alerts_count += 1
-                    print(f"[{datetime.now(timezone.utc).isoformat()}] ALERT: {title} | {detail}")
 
+                    # Guarded execution hook (dry-run unless AUTO_EXECUTE_LIVE=true)
+                    allowed, sizing_msg, units = validate_and_size_order(
+                        equity=10_000.0,
+                        realized_daily_pnl=0.0,
+                        open_positions_count=0,
+                        symbol=symbol,
+                        side=sig.direction,
+                        entry_price=sig.entry_price,
+                        stop_loss=sig.stop_loss,
+                        take_profit=sig.take_profit,
+                        requested_risk_pct=exec_cfg.max_risk_pct,
+                        cfg=exec_cfg,
+                    )
+                    exec_note = sizing_msg
+                    if allowed:
+                        _, exec_note = execute_order_guarded(
+                            symbol=symbol,
+                            side=sig.direction,
+                            entry_price=sig.entry_price,
+                            stop_loss=sig.stop_loss,
+                            take_profit=sig.take_profit,
+                            units=units,
+                            cfg=exec_cfg,
+                        )
+
+                    signals_history.append({
+                        "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+                        "closed_bar": closed_stamp,
+                        "asset": asset_name,
+                        "symbol": symbol,
+                        "direction": sig.direction,
+                        "confidence": sig.confidence,
+                        "entry": round(float(sig.entry_price), 5),
+                        "sl": round(float(sig.stop_loss), 5),
+                        "tp": round(float(sig.take_profit), 5),
+                        "rr": float(sig.rr_ratio),
+                        "htf_zone": sig.htf_zone_summary,
+                        "ltf_zone": sig.ltf_overlap_summary,
+                        "execution_status": exec_note,
+                    })
+                    print(f"[{datetime.now(timezone.utc).isoformat()}] ALERT: {title} | {detail} | {exec_note}")
+
+    write_worker_state(signals_history, new_alerts_count=new_alerts_count, status="running")
     return new_alerts_count
 
 
@@ -174,12 +242,15 @@ def main() -> None:
     tg_token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
     tg_chat_id = os.getenv("TELEGRAM_CHAT_ID", "").strip()
     run_once_mode = os.getenv("RUN_ONCE", "false").strip().lower() in ("1", "true", "yes")
+    exec_cfg = load_execution_config()
 
     notifier = NotificationCenter()
     seen_ids = load_seen_ids()
+    signals_history = load_existing_signals()
 
     print(
         f"DESTINY AI Worker started | poll={poll_seconds}s | rr=1:{rr_target:.1f} | "
+        f"live_exec={exec_cfg.auto_execute_live} | "
         f"telegram={'enabled' if (tg_token and tg_chat_id) else 'console-only'}"
     )
 
@@ -188,6 +259,8 @@ def main() -> None:
             count = run_once(
                 notifier=notifier,
                 seen_ids=seen_ids,
+                signals_history=signals_history,
+                exec_cfg=exec_cfg,
                 rr_target=rr_target,
                 tg_token=tg_token,
                 tg_chat_id=tg_chat_id,
@@ -195,6 +268,7 @@ def main() -> None:
             if count > 0:
                 save_seen_ids(seen_ids)
         except Exception as exc:
+            write_worker_state(signals_history, new_alerts_count=0, status=f"error: {exc}")
             print(f"[{datetime.now(timezone.utc).isoformat()}] Worker loop error: {exc}")
 
         if run_once_mode:
@@ -204,4 +278,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
