@@ -578,20 +578,8 @@ st.caption(
     "not live trading signals or instructions."
 )
 
-            results[timeframe] = {
-                "status": "ANALYSED",
-                "data": output,
-                "error": None,
-            }
 
-        except Exception as exc:
-
-            results[timeframe] = {
-                "status": "ERROR",
-                "error": str(exc),
-            }
-
-    return results
+            
 
 
 # =========================================================
