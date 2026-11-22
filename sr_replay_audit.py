@@ -1,6 +1,6 @@
 
 # =========================================================
-# DESTINY AI — ADVANCED S/R REPLAY AUDIT V2
+# DESTINY AI — ADVANCED S/R REPLAY AUDIT V3
 # Controlled synthetic tests only.
 # =========================================================
 
@@ -11,10 +11,11 @@ from sr_engine import analyze_sr, find_confirmed_pivots
 
 
 # ---------------------------------------------------------
-# 1. SYNTHETIC DATA
+# 1. CREATE CONTROLLED SYNTHETIC CANDLES
 # ---------------------------------------------------------
 
 def make_fixture():
+
     rows = 14
 
     data = pd.DataFrame({
@@ -35,9 +36,9 @@ def make_fixture():
     data.iloc[2, data.columns.get_loc("High")] = 110.0
 
     # Confirmation candle.
-    data.iloc[4, data.columns.get_loc("High")] = 109.5
-    data.iloc[4, data.columns.get_loc("Low")] = 108.5
-    data.iloc[4, data.columns.get_loc("Close")] = 109.0
+    data.iloc[4, data.columns.get_loc("High")] = 107.0
+    data.iloc[4, data.columns.get_loc("Low")] = 106.0
+    data.iloc[4, data.columns.get_loc("Close")] = 106.5
 
     # First touch.
     data.iloc[5, data.columns.get_loc("High")] = 109.5
@@ -54,7 +55,7 @@ def make_fixture():
     data.iloc[7, data.columns.get_loc("Low")] = 108.5
     data.iloc[7, data.columns.get_loc("Close")] = 107.5
 
-    # Remain inside: no duplicate count.
+    # Remain in the same visit.
     data.iloc[8, data.columns.get_loc("High")] = 109.5
     data.iloc[8, data.columns.get_loc("Low")] = 108.5
     data.iloc[8, data.columns.get_loc("Close")] = 109.0
@@ -83,10 +84,16 @@ def make_fixture():
 
 
 # ---------------------------------------------------------
-# 2. ISOLATED ENGINE FIXTURE
+# 2. ISOLATE THE S/R ENGINE FOR CONTROLLED TESTING
 # ---------------------------------------------------------
 
-def get_zone(data, end, mode="Wick", touch_on_confirmation=False):
+def get_zone(
+    data,
+    end,
+    mode="Wick",
+    touch_on_confirmation=False
+):
+
     visible = data.iloc[:end].copy()
 
     pivot = {
@@ -102,15 +109,24 @@ def get_zone(data, end, mode="Wick", touch_on_confirmation=False):
         return []
 
     def fake_atr(frame, period=14):
-        return pd.Series(2.0, index=frame.index)
+        return pd.Series(
+            2.0,
+            index=frame.index
+        )
 
-    if touch_on_confirmation:
+    if touch_on_confirmation and len(visible) > 4:
         visible.iloc[4, visible.columns.get_loc("High")] = 109.5
         visible.iloc[4, visible.columns.get_loc("Low")] = 108.5
         visible.iloc[4, visible.columns.get_loc("Close")] = 107.5
 
-    with patch("sr_engine.find_confirmed_pivots", side_effect=fake_pivots):
-        with patch("sr_engine.calculate_atr", side_effect=fake_atr):
+    with patch(
+        "sr_engine.find_confirmed_pivots",
+        side_effect=fake_pivots
+    ):
+        with patch(
+            "sr_engine.calculate_atr",
+            side_effect=fake_atr
+        ):
             zones = analyze_sr(
                 visible,
                 pivot_length=2,
@@ -122,7 +138,9 @@ def get_zone(data, end, mode="Wick", touch_on_confirmation=False):
     if zones.empty:
         return None
 
-    matches = zones[zones["Pivot Time"] == data.index[2]]
+    matches = zones[
+        zones["Pivot Time"] == data.index[2]
+    ]
 
     if matches.empty:
         return None
@@ -131,21 +149,28 @@ def get_zone(data, end, mode="Wick", touch_on_confirmation=False):
 
 
 # ---------------------------------------------------------
-# 3. TEST REPORTING
+# 3. REPORTING
 # ---------------------------------------------------------
 
 def report(name, passed, detail):
+
     status = "PASS" if passed else "FAIL"
+
     print(f"[{status}] {name} — {detail}")
+
     return passed
 
 
 # ---------------------------------------------------------
-# 4. PIVOT CONFIRMATION
+# 4. PIVOT CONFIRMATION TEST
 # ---------------------------------------------------------
 
 def test_confirmation(data):
-    pivots = find_confirmed_pivots(data, length=2)
+
+    pivots = find_confirmed_pivots(
+        data,
+        length=2
+    )
 
     found = [
         p for p in pivots
@@ -162,50 +187,67 @@ def test_confirmation(data):
     before = get_zone(data, 4)
     after = get_zone(data, 5)
 
-    passed = before is None and after is not None
+    passed = (
+        before is None
+        and after is not None
+    )
 
     return passed, (
         "Zone absent before confirmation and present afterward"
-        if passed else "Unexpected zone confirmation timing"
+        if passed else "Unexpected confirmation timing"
     )
 
 
 # ---------------------------------------------------------
-# 5. CONFIRMATION CANDLE TEST
+# 5. STRICT CONFIRMATION-CANDLE TEST
 # ---------------------------------------------------------
 
 def test_confirmation_candle(data):
-    # The confirmation candle touches and closes beyond
-    # the rejection boundary.
-    #
-    # If it is processed as a normal visit, the later
-    # return can produce an extra rejection count.
 
-    touched = get_zone(
-        data,
-        8,
-        touch_on_confirmation=True
+    touched = make_fixture()
+
+    # Confirmation candle touches the zone.
+    touched.iloc[4, touched.columns.get_loc("High")] = 109.5
+    touched.iloc[4, touched.columns.get_loc("Low")] = 108.5
+    touched.iloc[4, touched.columns.get_loc("Close")] = 107.5
+
+    # Next candle leaves the zone.
+    touched.iloc[5, touched.columns.get_loc("High")] = 107.5
+    touched.iloc[5, touched.columns.get_loc("Low")] = 106.5
+    touched.iloc[5, touched.columns.get_loc("Close")] = 107.0
+
+    # Following candle returns and rejects.
+    touched.iloc[6, touched.columns.get_loc("High")] = 109.5
+    touched.iloc[6, touched.columns.get_loc("Low")] = 108.5
+    touched.iloc[6, touched.columns.get_loc("Close")] = 107.5
+
+    zone = get_zone(
+        touched,
+        7,
+        touch_on_confirmation=False
     )
 
-    if touched is None:
-        return False, "Zone missing"
+    if zone is None:
+        return False, "Target zone missing"
 
-    count = int(touched["Rejections"])
+    count = int(zone["Rejections"])
 
-    return count == 1, (
-        f"Expected 1 rejection after later completed visit; found {count}"
+    return count == 0, (
+        f"Expected 0 rejections if confirmation candle is excluded; "
+        f"found {count}"
     )
 
 
 # ---------------------------------------------------------
-# 6. REJECTION COUNTING
+# 6. SEPARATE REJECTION COUNTING
 # ---------------------------------------------------------
 
 def test_rejections(data):
+
     zone = get_zone(data, 11)
 
     if zone is None:
-        return False, "Zone missing"
+        return False, "Target zone missing"
 
     count = int(zone["Rejections"])
 
@@ -214,11 +256,16 @@ def test_rejections(data):
     )
 
 
+# ---------------------------------------------------------
+# 7. DUPLICATE REJECTION PREVENTION
+# ---------------------------------------------------------
+
 def test_no_duplicates(data):
+
     zone = get_zone(data, 9)
 
     if zone is None:
-        return False, "Zone missing"
+        return False, "Target zone missing"
 
     count = int(zone["Rejections"])
 
@@ -228,43 +275,62 @@ def test_no_duplicates(data):
 
 
 # ---------------------------------------------------------
-# 7. INVALIDATION TESTS
+# 8. WICK INVALIDATION
 # ---------------------------------------------------------
 
 def test_wick_invalidation(data):
-    before = get_zone(data, 12, "Wick")
-    after = get_zone(data, 13, "Wick")
 
-    passed = before is not None and after is None
+    # Candle 11 has not yet been included.
+    before = get_zone(data, 11, "Wick")
 
-    return passed, (
-        "Wick breach removes the zone"
-        if passed else "Unexpected Wick invalidation"
+    # Candle 11 is now included.
+    after = get_zone(data, 12, "Wick")
+
+    passed = (
+        before is not None
+        and after is None
     )
 
+    return passed, (
+        "Zone exists before breach and disappears on wick breach"
+        if passed else "Unexpected Wick invalidation timing"
+    )
+
+
+# ---------------------------------------------------------
+# 9. CLOSE INVALIDATION
+# ---------------------------------------------------------
 
 def test_close_invalidation(data):
+
+    # Wick crosses boundary, but candle closes inside.
     before = get_zone(data, 12, "Close")
+
+    # Close now crosses the boundary.
     after = get_zone(data, 13, "Close")
 
-    passed = before is not None and after is None
+    passed = (
+        before is not None
+        and after is None
+    )
 
     return passed, (
-        "Close breach removes the zone"
-        if passed else "Unexpected Close invalidation"
+        "Zone survives wick-only breach and disappears after close breach"
+        if passed else "Unexpected Close invalidation timing"
     )
 
 
 # ---------------------------------------------------------
-# 8. HISTORICAL PREFIX CONSISTENCY
+# 10. REPEATABILITY TEST
 # ---------------------------------------------------------
 
-def test_prefix_consistency(data):
+def test_repeatability(data):
+
     first = get_zone(data, 11)
     second = get_zone(data, 11)
 
     if first is None or second is None:
-        return False, "Historical zone missing"
+        return False, "Expected historical zone missing"
 
     fields = [
         "Zone Low",
@@ -280,18 +346,18 @@ def test_prefix_consistency(data):
     )
 
     return consistent, (
-        "Repeated identical historical prefixes match"
-        if consistent else "Historical prefix results differ"
+        "Identical historical inputs produce identical results"
+        if consistent else "Repeated results differ"
     )
 
 
 # ---------------------------------------------------------
-# 9. MAIN AUDIT
+# 11. MAIN AUDIT
 # ---------------------------------------------------------
 
 def main():
 
-    print("DESTINY AI — ADVANCED S/R REPLAY AUDIT V2")
+    print("DESTINY AI — ADVANCED S/R REPLAY AUDIT V3")
     print("Controlled synthetic candles only.")
     print("No live-market data or trading signals.\n")
 
@@ -304,15 +370,17 @@ def main():
         ("Duplicate rejection prevention", lambda: test_no_duplicates(data)),
         ("Wick invalidation", lambda: test_wick_invalidation(data)),
         ("Close invalidation", lambda: test_close_invalidation(data)),
-        ("Historical prefix consistency", lambda: test_prefix_consistency(data))
+        ("Historical repeatability", lambda: test_repeatability(data))
     ]
 
     passed = 0
     failed = 0
 
     for name, function in tests:
+
         try:
             success, detail = function()
+
         except Exception as error:
             success = False
             detail = f"Test error: {error}"
@@ -325,15 +393,16 @@ def main():
     print("\n================================")
     print("AUDIT SUMMARY")
     print("================================")
+
     print(f"Passed: {passed}")
     print(f"Failed: {failed}")
     print(f"Total: {passed + failed}")
 
     print("\nINTERPRETATION")
-    print("These tests use controlled synthetic data.")
-    print("Passing does not certify complete look-ahead freedom.")
-    print("Historical consistency here checks repeatability,")
-    print("not all possible future-data leakage.")
+    print("Synthetic tests check selected engine behaviours.")
+    print("A failure requires investigation, not automatic code changes.")
+    print("Repeatability does not prove absence of look-ahead bias.")
+    print("This audit does not certify all historical market data.")
 
     print("\nAdvanced S/R replay audit completed.")
 
