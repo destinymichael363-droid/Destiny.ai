@@ -20,9 +20,26 @@ st.set_page_config(
 st.title("Destiny AI — S/R Audits")
 st.caption("Synthetic diagnostics only • No live-market signals")
 
+st.subheader("Deployment diagnostics")
+
+st.write("App folder:", ROOT)
+
+replay_path = os.path.join(ROOT, "sr_replay_audit.py")
+
+st.write("Replay file exists:", os.path.isfile(replay_path))
+
+python_files = sorted(
+    f for f in os.listdir(ROOT)
+    if f.endswith(".py")
+)
+
+st.write("Python files:", python_files)
+
 
 def run_audit(module_name):
     output = io.StringIO()
+
+    st.write("Requested module:", module_name)
 
     try:
         importlib.invalidate_caches()
@@ -39,7 +56,7 @@ def run_audit(module_name):
         st.code(results, language="text")
 
         if "[FAIL]" in results:
-            st.error("Audit found a failure. Review the output.")
+            st.error("Audit found a failure.")
         else:
             st.success("Audit completed. Review the results.")
 
