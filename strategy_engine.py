@@ -1,787 +1,122 @@
+from __future__ import annotations
 
-"""
-DESTINY AI — BOS + INSTITUTIONAL OB + FVG + BSL/SSL
-Educational historical market-analysis engine.
-Input: OHLCV pandas DataFrame.
-"""
-
+from dataclasses import dataclass
+import numpy as np
 import pandas as pd
 
 
-DEFAULT_SETTINGS = {
-    "pivot_length": 5,
-    "ob_lookback": 20,
-    "min_ob_atr": 0.35,
-    "displacement_search": 8,
-    "min_displacement_atr": 0.80,
-    "min_close_location": 0.65,
-    "fvg_search": 24,
-    "atr_length": 14,
-    "min_fvg_atr": 0.20,
-    "use_volume_filter": True,
-    "volume_length": 20,
-    "min_fvg_volume_ratio": 1.5,
-    "max_liquidity_levels": 30,
-    "max_historical_setups": 100,
-}
-
-
-def calculate_atr(df, length=14):
-    previous_close = df["Close"].shift(1)
-
-    ranges = pd.concat([
-        df["High"] - df["Low"],
-        (df["High"] - previous_close).abs(),
-        (df["Low"] - previous_close).abs()
-    ], axis=1)
-
-    true_range = ranges.max(axis=1)
-
-    return true_range.ewm(
-        alpha=1 / length,
-        adjust=False,
-        min_periods=length
-    ).mean()
-
-
-def analyze_market(data, settings=None):
-    """
-    Detect historical BOS, displacement, opposing OB,
-    overlapping FVG, BSL/SSL liquidity and invalidation.
-
-    Returns:
-        candles
-        setups
-        liquidity
-        statistics
-    """
-
-    cfg = DEFAULT_SETTINGS.copy()
-
-    if settings:
-        cfg.update(settings)
-
-    df = data.copy()
-
-    required = ["Open", "High", "Low", "Close", "Volume"]
-
-    missing = [col for col in required if col not in df.columns]
-
-    if missing:
-        raise ValueError(
-            "Missing required columns: " + ", ".join(missing)
-        )
-
-    df = df[required].copy()
-
-    for col in required:
-        df[col] = pd.to_numeric(df[col], errors="coerce")
-
-    df = df.dropna(
-        subset=["Open", "High", "Low", "Close"]
-    )
-
-    df = df.sort_index()
-    df = df[~df.index.duplicated(keep="last")]
-
-    minimum = max(
-        cfg["atr_length"] + 5,
-        cfg["pivot_length"] * 2 + 5
-    )
-
-    if len(df) < minimum:
-        raise ValueError(
-            "Not enough historical candles for analysis."
-        )
-
-    df["ATR"] = calculate_atr(
-        df, cfg["atr_length"]
-    )
-
-    df["AverageVolume"] = df["Volume"].rolling(
-        cfg["volume_length"]
-    ).mean()
-
-    df["Bullish_BOS"] = False
-    df["Bearish_BOS"] = False
-    df["Bullish_Setup"] = False
-    df["Bearish_Setup"] = False
-    df["BSL_Sweep"] = False
-    df["SSL_Sweep"] = False
-
-    last_high = None
-    last_low = None
-
-    last_high_broken = False
-    last_low_broken = False
-
-    liquidity_levels = []
-    all_liquidity = []
-
-    active_zones = []
-    setups = []
-
-    pending_bull = None
-    pending_bear = None
-
-    invalidated_count = 0
-    qualified_setup_count = 0
-
-    total_bullish_bos = 0
-    total_bearish_bos = 0
-
-    pivot_length = cfg["pivot_length"]
-
-    # -----------------------------------------------------
-    # CONFIRMED PIVOT DETECTION
-    # -----------------------------------------------------
-
-    def find_pivot(position, side):
-
-        start = position - pivot_length
-        end = position + pivot_length + 1
-
-        if start < 0 or end > len(df):
-            return False
-
-        values = (
-            df["High"].iloc[start:end]
-            if side == "high"
-            else df["Low"].iloc[start:end]
-        )
-
-        center = values.iloc[pivot_length]
-
-        # Unique pivot prevents equal-high/equal-low duplicates.
-        if side == "high":
-            return (
-                center == values.max()
-                and (values == center).sum() == 1
-            )
-
-        return (
-            center == values.min()
-            and (values == center).sum() == 1
-        )
-
-    # -----------------------------------------------------
-    # ORDER BLOCK INVALIDATION
-    # -----------------------------------------------------
-
-    def ob_invalidated(ob, direction, close):
-
-        if direction == 1:
-            return close < ob["ob_low"]
-
-        return close > ob["ob_high"]
-
-    # -----------------------------------------------------
-    # FVG DETECTION AND OB OVERLAP
-    # -----------------------------------------------------
-
-    def check_fvg(position, direction, ob_high, ob_low):
-
-        if position < 2:
-            return None
-
-        row = df.iloc[position]
-        two_back = df.iloc[position - 2]
-
-        atr = row["ATR"]
-
-        if pd.isna(atr) or atr <= 0:
-            return None
-
-        # Compare the FVG-completing candle's volume
-        # against the average volume before that candle.
-        if cfg["use_volume_filter"]:
-
-            previous_average = (
-                df["AverageVolume"].iloc[position - 1]
-            )
-
-            current_volume = row["Volume"]
-
-            volume_pass = (
-                pd.notna(current_volume)
-                and pd.notna(previous_average)
-                and previous_average > 0
-                and current_volume
-                >= previous_average
-                * cfg["min_fvg_volume_ratio"]
-            )
-
-            if not volume_pass:
-                return None
-
-        if direction == 1:
-
-            gap_low = two_back["High"]
-            gap_high = row["Low"]
-
-            valid_gap = (
-                gap_high > gap_low
-                and gap_high - gap_low
-                >= atr * cfg["min_fvg_atr"]
-            )
-
-        else:
-
-            gap_high = two_back["Low"]
-            gap_low = row["High"]
-
-            valid_gap = (
-                gap_high > gap_low
-                and gap_high - gap_low
-                >= atr * cfg["min_fvg_atr"]
-            )
-
-        if not valid_gap:
-            return None
-
-        # Require genuine price-range overlap.
-        overlap = (
-            max(ob_low, gap_low)
-            < min(ob_high, gap_high)
-        )
-
-        if not overlap:
-            return None
-
-        return {
-            "fvg_high": float(gap_high),
-            "fvg_low": float(gap_low),
-            "fvg_time": df.index[position]
-        }
-
-    # -----------------------------------------------------
-    # SEARCH FOR FVG AFTER THE ORDER BLOCK
-    # -----------------------------------------------------
-
-    def find_setup(position, direction, ob):
-
-        start = max(
-            ob["position"] + 1,
-            position - cfg["fvg_search"]
-        )
-
-        for fvg_position in range(
-            position, start - 1, -1
-        ):
-
-            result = check_fvg(
-                fvg_position,
-                direction,
-                ob["ob_high"],
-                ob["ob_low"]
-            )
-
-            if result:
-                return result
-
+@dataclass
+class TradeSetup:
+    symbol: str
+    tf_label: str
+    direction: str      # "LONG" or "SHORT"
+    entry: float
+    sl: float
+    tp: float
+    rr: float
+    confidence: str     # "HIGH", "MEDIUM", or "LOW"
+    reason: str
+
+
+def _zone_bounds(zone: object) -> tuple[float, float, str] | None:
+    if isinstance(zone, dict):
+        low_v = zone.get("bottom", zone.get("overlap_low", zone.get("ob_low", zone.get("low"))))
+        high_v = zone.get("top", zone.get("overlap_high", zone.get("ob_high", zone.get("high"))))
+        z_type = str(zone.get("zone_type", zone.get("kind", zone.get("direction", "")))).lower()
+    else:
+        low_v = getattr(zone, "bottom", getattr(zone, "low", None))
+        high_v = getattr(zone, "top", getattr(zone, "high", None))
+        z_type = str(getattr(zone, "zone_type", getattr(zone, "kind", ""))).lower()
+
+    if low_v is None or high_v is None:
         return None
+    b, t = float(low_v), float(high_v)
+    if b > t:
+        b, t = t, b
+    return b, t, z_type
 
-    # -----------------------------------------------------
-    # CREATE A QUALIFIED HISTORICAL SETUP
-    # -----------------------------------------------------
 
-    def create_setup(direction, ob, fvg, bos_time):
+def evaluate_setups(
+    df: pd.DataFrame,
+    symbol: str = "ASSET",
+    tf_label: str = "15M",
+    sr_out: dict | None = None,
+    ob_out: dict | None = None,
+    rr_target: float = 5.0,
+    max_setups: int = 3,
+) -> list[TradeSetup]:
+    if df is None or df.empty or len(df) < 15:
+        return []
 
-        nonlocal qualified_setup_count
+    last_row = df.iloc[-1]
+    prev_row = df.iloc[-2]
+    price = float(last_row["Close"])
+    atr_proxy = float((df["High"] - df["Low"]).tail(14).mean())
+    buffer = max(atr_proxy * 0.35, abs(price) * 0.0005)
 
-        setup = {
-            "direction": (
-                "BULLISH" if direction == 1 else "BEARISH"
-            ),
-            "bos_time": bos_time,
-            "ob_time": ob["ob_time"],
-            "ob_high": ob["ob_high"],
-            "ob_low": ob["ob_low"],
-            "fvg_time": fvg["fvg_time"],
-            "fvg_high": fvg["fvg_high"],
-            "fvg_low": fvg["fvg_low"],
-            "status": "ACTIVE"
-        }
+    setups: list[TradeSetup] = []
+    active_sr = (sr_out or {}).get("active_zones", []) or []
+    overlaps = (ob_out or {}).get("overlaps", []) or []
 
-        setups.append(setup)
-        active_zones.append(setup)
+    # Check bullish confluence (support or bullish OB+FVG near/below current price with bounce)
+    for zone in active_sr[-4:]:
+        bounds = _zone_bounds(zone)
+        if not bounds:
+            continue
+        bot, top, z_type = bounds
+        is_bull_zone = "sup" in z_type or "demand" in z_type or "bull" in z_type
+        is_bear_zone = "res" in z_type or "supply" in z_type or "bear" in z_type
 
-        qualified_setup_count += 1
-
-        return setup
-
-    # =====================================================
-    # MAIN HISTORICAL ANALYSIS LOOP
-    # =====================================================
-
-    for i in range(len(df)):
-
-        row = df.iloc[i]
-        current_time = df.index[i]
-
-        # -------------------------------------------------
-        # 1. CONFIRM SWING PIVOTS AND LIQUIDITY LEVELS
-        # -------------------------------------------------
-
-        pivot_position = i - pivot_length
-
-        if pivot_position >= pivot_length:
-
-            if find_pivot(pivot_position, "high"):
-
-                price = float(
-                    df["High"].iloc[pivot_position]
+        if is_bull_zone and price >= bot * 0.998 and float(last_row["Close"]) > float(last_row["Open"]):
+            sl = round(bot - buffer, 5)
+            risk = max(price - sl, buffer)
+            tp = round(price + (risk * float(rr_target)), 5)
+            setups.append(
+                TradeSetup(
+                    symbol=symbol,
+                    tf_label=tf_label,
+                    direction="LONG",
+                    entry=round(price, 5),
+                    sl=sl,
+                    tp=tp,
+                    rr=float(rr_target),
+                    confidence="MEDIUM",
+                    reason=f"Bullish rejection at {tf_label} support zone [{bot:.5f}–{top:.5f}]",
                 )
-
-                last_high = price
-                last_high_broken = False
-
-                if not any(
-                    level["side"] == "BSL"
-                    and level["price"] == price
-                    for level in liquidity_levels
-                ):
-
-                    level = {
-                        "side": "BSL",
-                        "price": price,
-                        "pivot_time": df.index[pivot_position],
-                        "swept_time": None,
-                        "swept": False
-                    }
-
-                    liquidity_levels.append(level)
-                    all_liquidity.append(level)
-
-            if find_pivot(pivot_position, "low"):
-
-                price = float(
-                    df["Low"].iloc[pivot_position]
-                )
-
-                last_low = price
-                last_low_broken = False
-
-                if not any(
-                    level["side"] == "SSL"
-                    and level["price"] == price
-                    for level in liquidity_levels
-                ):
-
-                    level = {
-                        "side": "SSL",
-                        "price": price,
-                        "pivot_time": df.index[pivot_position],
-                        "swept_time": None,
-                        "swept": False
-                    }
-
-                    liquidity_levels.append(level)
-                    all_liquidity.append(level)
-
-        # -------------------------------------------------
-        # 2. DETECT BSL / SSL WICK SWEEPS
-        # -------------------------------------------------
-
-        for level in liquidity_levels[:]:
-
-            swept = (
-                row["High"] > level["price"]
-                if level["side"] == "BSL"
-                else row["Low"] < level["price"]
             )
+            break
 
-            if swept:
-
-                level["swept"] = True
-                level["swept_time"] = current_time
-
-                column = (
-                    "BSL_Sweep"
-                    if level["side"] == "BSL"
-                    else "SSL_Sweep"
+        if is_bear_zone and price <= top * 1.002 and float(last_row["Close"]) < float(last_row["Open"]):
+            sl = round(top + buffer, 5)
+            risk = max(sl - price, buffer)
+            tp = round(price - (risk * float(rr_target)), 5)
+            setups.append(
+                TradeSetup(
+                    symbol=symbol,
+                    tf_label=tf_label,
+                    direction="SHORT",
+                    entry=round(price, 5),
+                    sl=sl,
+                    tp=tp,
+                    rr=float(rr_target),
+                    confidence="MEDIUM",
+                    reason=f"Bearish rejection at {tf_label} resistance zone [{bot:.5f}–{top:.5f}]",
                 )
-
-                df.iloc[
-                    i, df.columns.get_loc(column)
-                ] = True
-
-                liquidity_levels.remove(level)
-
-        if len(liquidity_levels) > cfg["max_liquidity_levels"]:
-
-            liquidity_levels = liquidity_levels[
-                -cfg["max_liquidity_levels"]:
-            ]
-
-        # -------------------------------------------------
-        # 3. DETECT CLOSE-CONFIRMED BOS
-        # -------------------------------------------------
-
-        previous_close = (
-            df["Close"].iloc[i - 1]
-            if i > 0 else None
-        )
-
-        bull_bos = (
-            last_high is not None
-            and not last_high_broken
-            and previous_close is not None
-            and previous_close <= last_high
-            and row["Close"] > last_high
-        )
-
-        bear_bos = (
-            last_low is not None
-            and not last_low_broken
-            and previous_close is not None
-            and previous_close >= last_low
-            and row["Close"] < last_low
-        )
-
-        if bull_bos:
-
-            last_high_broken = True
-
-            df.iloc[
-                i, df.columns.get_loc("Bullish_BOS")
-            ] = True
-
-            total_bullish_bos += 1
-
-        if bear_bos:
-
-            last_low_broken = True
-
-            df.iloc[
-                i, df.columns.get_loc("Bearish_BOS")
-            ] = True
-
-            total_bearish_bos += 1
-
-        # -------------------------------------------------
-        # 4. PROCESS PENDING BULLISH OB
-        # -------------------------------------------------
-
-        if pending_bull is not None:
-
-            age = i - pending_bull["bos_position"]
-
-            if ob_invalidated(
-                pending_bull, 1, row["Close"]
-            ):
-                pending_bull = None
-
-            elif age > cfg["fvg_search"]:
-                pending_bull = None
-
-            elif i > pending_bull["bos_position"]:
-
-                fvg = check_fvg(
-                    i,
-                    1,
-                    pending_bull["ob_high"],
-                    pending_bull["ob_low"]
-                )
-
-                if fvg:
-
-                    create_setup(
-                        1,
-                        pending_bull,
-                        fvg,
-                        pending_bull["bos_time"]
-                    )
-
-                    df.iloc[
-                        i,
-                        df.columns.get_loc("Bullish_Setup")
-                    ] = True
-
-                    pending_bull = None
-
-        # -------------------------------------------------
-        # 5. PROCESS PENDING BEARISH OB
-        # -------------------------------------------------
-
-        if pending_bear is not None:
-
-            age = i - pending_bear["bos_position"]
-
-            if ob_invalidated(
-                pending_bear, -1, row["Close"]
-            ):
-                pending_bear = None
-
-            elif age > cfg["fvg_search"]:
-                pending_bear = None
-
-            elif i > pending_bear["bos_position"]:
-
-                fvg = check_fvg(
-                    i,
-                    -1,
-                    pending_bear["ob_high"],
-                    pending_bear["ob_low"]
-                )
-
-                if fvg:
-
-                    create_setup(
-                        -1,
-                        pending_bear,
-                        fvg,
-                        pending_bear["bos_time"]
-                    )
-
-                    df.iloc[
-                        i,
-                        df.columns.get_loc("Bearish_Setup")
-                    ] = True
-
-                    pending_bear = None
-
-        # -------------------------------------------------
-        # 6. FIND DISPLACEMENT AND PRECEDING OB
-        # -------------------------------------------------
-
-        for direction, bos in [
-            (1, bull_bos),
-            (-1, bear_bos)
-        ]:
-
-            if not bos:
-                continue
-
-            displacement_position = None
-
-            search_start = max(
-                0,
-                i - cfg["displacement_search"]
             )
+            break
 
-            # Find the most recent qualifying displacement
-            # candle between the search start and BOS.
-            for k in range(i, search_start - 1, -1):
+    # Boost to HIGH confidence if an OB+FVG overlap aligns with the same direction
+    for ov in overlaps[-3:]:
+        bounds = _zone_bounds(ov)
+        if not bounds:
+            continue
+        bot, top, z_type = bounds
+        for s in setups:
+            if s.direction == "LONG" and (bot <= s.entry <= top * 1.01 or "1" in z_type or "bull" in z_type):
+                s.confidence = "HIGH"
+                s.reason += " + OB/FVG overlap confluence"
+            elif s.direction == "SHORT" and (bot * 0.99 <= s.entry <= top or "-1" in z_type or "bear" in z_type):
+                s.confidence = "HIGH"
+                s.reason += " + OB/FVG overlap confluence"
 
-                candle = df.iloc[k]
-                atr = candle["ATR"]
-
-                if pd.isna(atr) or atr <= 0:
-                    continue
-
-                candle_range = (
-                    candle["High"] - candle["Low"]
-                )
-
-                if candle_range <= 0:
-                    continue
-
-                if direction == 1:
-
-                    body = (
-                        candle["Close"] - candle["Open"]
-                    )
-
-                    close_location = (
-                        candle["Close"] - candle["Low"]
-                    ) / candle_range
-
-                else:
-
-                    body = (
-                        candle["Open"] - candle["Close"]
-                    )
-
-                    close_location = (
-                        candle["High"] - candle["Close"]
-                    ) / candle_range
-
-                if (
-                    body >= atr * cfg["min_displacement_atr"]
-                    and close_location
-                    >= cfg["min_close_location"]
-                ):
-
-                    displacement_position = k
-                    break
-
-            if displacement_position is None:
-                continue
-
-            # -------------------------------------------------
-            # CORRECTED OB SEARCH
-            # Search BACKWARD from displacement.
-            # Bullish BOS: preceding bearish candle.
-            # Bearish BOS: preceding bullish candle.
-            # -------------------------------------------------
-
-            ob = None
-
-            ob_start = max(
-                0,
-                displacement_position - cfg["ob_lookback"]
-            )
-
-            for j in range(
-                displacement_position - 1,
-                ob_start - 1,
-                -1
-            ):
-
-                candle = df.iloc[j]
-                atr = candle["ATR"]
-
-                if pd.isna(atr) or atr <= 0:
-                    continue
-
-                candle_range = (
-                    candle["High"] - candle["Low"]
-                )
-
-                if direction == 1:
-
-                    valid = (
-                        candle["Close"] < candle["Open"]
-                        and candle_range
-                        >= atr * cfg["min_ob_atr"]
-                    )
-
-                else:
-
-                    valid = (
-                        candle["Close"] > candle["Open"]
-                        and candle_range
-                        >= atr * cfg["min_ob_atr"]
-                    )
-
-                if valid:
-
-                    ob = {
-                        "position": j,
-                        "ob_time": df.index[j],
-                        "ob_high": float(candle["High"]),
-                        "ob_low": float(candle["Low"]),
-                        "bos_position": i,
-                        "bos_time": current_time
-                    }
-
-                    break
-
-            if ob is None:
-                continue
-
-            # -------------------------------------------------
-            # 7. REQUIRE QUALIFIED OVERLAPPING FVG
-            # -------------------------------------------------
-
-            fvg = find_setup(
-                i,
-                direction,
-                ob
-            )
-
-            if fvg:
-
-                create_setup(
-                    direction,
-                    ob,
-                    fvg,
-                    current_time
-                )
-
-                column = (
-                    "Bullish_Setup"
-                    if direction == 1
-                    else "Bearish_Setup"
-                )
-
-                df.iloc[
-                    i, df.columns.get_loc(column)
-                ] = True
-
-            else:
-
-                # Do not silently overwrite an existing
-                # pending setup in the same direction.
-                if direction == 1:
-
-                    if pending_bull is None:
-                        pending_bull = ob
-
-                else:
-
-                    if pending_bear is None:
-                        pending_bear = ob
-
-        # -------------------------------------------------
-        # 8. INVALIDATE ACTIVE OB + FVG PAIRS
-        # Only confirmed candle closes invalidate them.
-        # -------------------------------------------------
-
-        for zone in active_zones[:]:
-
-            if zone["direction"] == "BULLISH":
-
-                invalid = (
-                    row["Close"] < zone["ob_low"]
-                    or row["Close"] < zone["fvg_low"]
-                )
-
-            else:
-
-                invalid = (
-                    row["Close"] > zone["ob_high"]
-                    or row["Close"] > zone["fvg_high"]
-                )
-
-            if invalid:
-
-                zone["status"] = "INVALIDATED"
-
-                active_zones.remove(zone)
-
-                invalidated_count += 1
-
-    # =====================================================
-    # 9. PREPARE OUTPUT TABLES AND STATISTICS
-    # =====================================================
-
-    setups = setups[
-        -cfg["max_historical_setups"]:
-    ]
-
-    setup_table = pd.DataFrame(setups)
-
-    liquidity_table = pd.DataFrame(all_liquidity)
-
-    statistics = {
-        "total_qualified_setups": qualified_setup_count,
-
-        "returned_historical_setups": len(setups),
-
-        "active_setups": len(active_zones),
-
-        "invalidated_setups": invalidated_count,
-
-        "bullish_bos": total_bullish_bos,
-
-        "bearish_bos": total_bearish_bos,
-
-        "active_bsl_levels": sum(
-            1 for x in liquidity_levels
-            if x["side"] == "BSL"
-        ),
-
-        "active_ssl_levels": sum(
-            1 for x in liquidity_levels
-            if x["side"] == "SSL"
-        )
-    }
-
-    return {
-        "candles": df,
-        "setups": setup_table,
-        "liquidity": liquidity_table,
-        "statistics": statistics
-    }
+    return setups[:max_setups]
