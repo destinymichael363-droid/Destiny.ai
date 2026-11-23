@@ -124,7 +124,6 @@ def _resample_4h(hourly: pd.DataFrame) -> pd.DataFrame:
 
 
 def _download_history(symbol: str, interval: str, period: str) -> pd.DataFrame:
-    # Try yf.download first (often fresher than Ticker.history), then fall back to Ticker.history
     try:
         dl = yf.download(
             tickers=symbol,
@@ -175,9 +174,17 @@ def fetch_tf_chart(symbol: str, tf_label: str, lookback_bars: int = 250, nonce: 
 
 
 def _clear_chart_caches() -> None:
-    _fetch_1m_chart.clear()
-    _fetch_other_tf_chart.clear()
-    fetch_tf_chart.clear()
+    for fn in (_fetch_1m_chart, _fetch_other_tf_chart, fetch_tf_chart):
+        clr = getattr(fn, "clear", None)
+        if callable(clr):
+            try:
+                clr()
+            except Exception:
+                pass
+    try:
+        st.cache_data.clear()
+    except Exception:
+        pass
 
 
 def _inject_auto_reload(interval_sec: int) -> None:
@@ -287,6 +294,37 @@ def _load_or_init_virtual_account(username: str) -> tuple[VirtualAccount, list[d
         except Exception:
             pass
     return acct, closed_log
+
+
+def _compute_controlled_unrealized_pnl(
+    acct: VirtualAccount,
+    symbol: str,
+    current_px: float,
+    max_pnl_cap: float | None = None,
+) -> float:
+    if current_px <= 0:
+        return 0.0
+    total_pnl = 0.0
+    for pos in list(getattr(acct, "positions", []) or []):
+        p_sym = str(_get_val(pos, ("symbol",), ""))
+        if p_sym != symbol:
+            continue
+        p_side = str(_get_val(pos, ("side",), "LONG")).upper()
+        p_entry = float(_get_val(pos, ("entry_price", "entry"), current_px))
+        p_units = float(_get_val(pos, ("units", "size", "qty", "quantity"), 0.0))
+
+        # Normalize direction sign if units were stored unsigned
+        signed_units = p_units
+        if p_side == "SHORT" and signed_units > 0:
+            signed_units = -signed_units
+        elif p_side == "LONG" and signed_units < 0:
+            signed_units = abs(signed_units)
+
+        pos_pnl = (current_px - p_entry) * signed_units
+        if max_pnl_cap is not None and max_pnl_cap > 0:
+            pos_pnl = max(-max_pnl_cap, min(max_pnl_cap, pos_pnl))
+        total_pnl += pos_pnl
+    return float(total_pnl)
 
 
 def _send_confirmation_email(to_email: str, code: str) -> tuple[bool, str]:
@@ -1091,6 +1129,7 @@ def _close_virtual_position_safe(
     acct: VirtualAccount,
     pos_index: int,
     exit_px: float,
+    max_pnl_cap: float | None = None,
 ) -> tuple[bool, str]:
     closed_log: list[dict] = st.session_state.setdefault("closed_positions_log", [])
     positions = getattr(acct, "positions", None)
@@ -1111,11 +1150,15 @@ def _close_virtual_position_safe(
         except Exception:
             pass
 
-    raw_pnl = _get_val(pos, ("pnl", "unrealized_pnl"))
-    if raw_pnl is not None:
-        pnl_val = float(raw_pnl)
-    else:
-        pnl_val = (exit_px - entry_p) * units_val
+    signed_units = units_val
+    if side == "SHORT" and signed_units > 0:
+        signed_units = -signed_units
+    elif side == "LONG" and signed_units < 0:
+        signed_units = abs(signed_units)
+
+    pnl_val = (exit_px - entry_p) * signed_units
+    if max_pnl_cap is not None and max_pnl_cap > 0:
+        pnl_val = max(-max_pnl_cap, min(max_pnl_cap, pnl_val))
 
     handled_by_acct = False
     for method_name in ("close_position", "close_trade", "remove_position"):
@@ -1391,9 +1434,12 @@ def _run_app() -> None:
     with side_col:
         st.subheader("Virtual Account")
         current_px = float(df_chart["Close"].iloc[-1]) if not df_chart.empty else 0.0
-        unrl = acct.unrealized_pnl({symbol: current_px}) if current_px > 0 else 0.0
         risk_dollars = float(acct.balance) * (float(risk_pct) / 100.0)
         reward_dollars = risk_dollars * float(rr_target)
+
+        cap_unrl = st.checkbox("Control / Cap Unrealized Swing", value=True)
+        max_pnl_cap = reward_dollars if cap_unrl else None
+        unrl = _compute_controlled_unrealized_pnl(acct, symbol, current_px, max_pnl_cap=max_pnl_cap)
 
         m1, m2 = st.columns(2)
         m1.metric("Cash Balance", f"${acct.balance:,.2f}", delta=f"Unrealized: {unrl:+,.2f}")
@@ -1435,7 +1481,9 @@ def _run_app() -> None:
                     f"#{i+1} **{p_side} {p_sym}** @ `{p_entry:.5f}` | SL `{p_sl:.5f}` | TP `{p_tp:.5f}`"
                 )
                 if c_btn.button("Close", key=f"close_pos_{i}"):
-                    ok_c, msg_c = _close_virtual_position_safe(user, acct, i, exit_ref)
+                    ok_c, msg_c = _close_virtual_position_safe(
+                        user, acct, i, exit_ref, max_pnl_cap=max_pnl_cap
+                    )
                     (st.success if ok_c else st.error)(msg_c)
                     st.rerun()
         else:
