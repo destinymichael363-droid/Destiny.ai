@@ -427,6 +427,35 @@ def _compute_bos_fallback(df: pd.DataFrame) -> list[tuple[int, int, float, str]]
             last_swing_low = None
 
     return bos_events[-4:]
+def _compute_liquidity_sweeps_fallback(df: pd.DataFrame) -> list[tuple[int, float, str]]:
+    if len(df) < 12:
+        return []
+    swing_n = 3
+    highs = df["High"].to_numpy(dtype=float)
+    lows = df["Low"].to_numpy(dtype=float)
+    closes = df["Close"].to_numpy(dtype=float)
+
+    last_high: tuple[int, float] | None = None
+    last_low: tuple[int, float] | None = None
+    sweeps: list[tuple[int, float, str]] = []
+
+    for i in range(swing_n, len(df) - swing_n):
+        if highs[i] == np.max(highs[i - swing_n : i + swing_n + 1]):
+            last_high = (i, float(highs[i]))
+        if lows[i] == np.min(lows[i - swing_n : i + swing_n + 1]):
+            last_low = (i, float(lows[i]))
+
+    for i in range(swing_n + 1, len(df)):
+        if last_high is not None and i > last_high[0]:
+            if highs[i] > last_high[1] and closes[i] < last_high[1]:
+                sweeps.append((i, float(highs[i]), "SWEEP ↑"))
+                last_high = None
+        if last_low is not None and i > last_low[0]:
+            if lows[i] < last_low[1] and closes[i] > last_low[1]:
+                sweeps.append((i, float(lows[i]), "SWEEP ↓"))
+                last_low = None
+
+    return sweeps[-4:]
 
 
 def _compute_bsl_ssl_fallback(df: pd.DataFrame) -> list[tuple[int, int, float, str]]:
