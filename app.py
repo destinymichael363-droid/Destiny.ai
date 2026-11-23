@@ -18,15 +18,27 @@ from broker_and_account import BrokerSession, VirtualAccount
 from ob_fvg_engine import run_ob_fvg_engine
 from sr_engine import run_sr_zones_engine
 
+try:
+    import mtf_runner as _mtf_runner  # type: ignore
+except Exception:
+    _mtf_runner = None
+
+try:
+    import notifications as _notifications  # type: ignore
+except Exception:
+    _notifications = None
+
 
 st.set_page_config(page_title="DESTINY AI — 5-TF Scalp & Account Studio", layout="wide")
 
 WATCHLIST: dict[str, str] = {
+    # Commodities
     "Gold (XAU)": "GC=F",
     "Silver (XAG)": "SI=F",
     "Crude Oil (WTI)": "CL=F",
     "Brent Oil": "BZ=F",
     "Natural Gas": "NG=F",
+    # Forex Pairs
     "EUR/USD": "EURUSD=X",
     "GBP/USD": "GBPUSD=X",
     "USD/JPY": "USDJPY=X",
@@ -36,6 +48,7 @@ WATCHLIST: dict[str, str] = {
     "CAD/JPY": "CADJPY=X",
     "CAD/CHF": "CADCHF=X",
     "GBP/NZD": "GBPNZD=X",
+    # Crypto
     "Bitcoin (BTC)": "BTC-USD",
     "Ethereum (ETH)": "ETH-USD",
 }
@@ -120,6 +133,18 @@ def _send_confirmation_email(to_email: str, code: str) -> tuple[bool, str]:
     smtp_user = os.getenv("SMTP_USER", "").strip()
     smtp_pass = os.getenv("SMTP_PASS", "").strip()
     smtp_from = os.getenv("SMTP_FROM", smtp_user).strip()
+
+    if _notifications is not None:
+        for fn_name in ("send_confirmation_email", "send_email_code", "send_verification_code"):
+            fn = getattr(_notifications, fn_name, None)
+            if callable(fn):
+                try:
+                    res = fn(to_email, code)
+                    if isinstance(res, tuple) and len(res) == 2:
+                        return bool(res[0]), str(res[1])
+                    return True, f"Confirmation code sent to **{to_email}**."
+                except Exception:
+                    pass
 
     if not smtp_host or not smtp_user or not smtp_pass:
         return False, f"SMTP not configured yet. Use confirmation code: **{code}**"
@@ -317,5 +342,36 @@ def _filter_close_invalidated_sr(df: pd.DataFrame, zones: list) -> list:
 
 
 def _compute_minor_sr_fallback(df: pd.DataFrame, tf_label: str, min_box_h: float) -> list[dict]:
+    if len(df) < 10:
+        return []
+    lookback = 3 if tf_label in ("15M", "5M", "1M") else 4
+    highs = df["High"].to_numpy(dtype=float)
+    lows = df["Low"].to_numpy(dtype=float)
+    pad = max(min_box_h * 0.65, float(np.median(highs - lows)) * 0.5)
+
+    levels: list[dict] = []
+    for i in range(lookback, len(df) - lookback):
+        if highs[i] == np.max(highs[i - lookback : i + lookback + 1]):
+            px = float(highs[i])
+            b, t = _ensure_min_box_height(px - pad, px + pad, min_box_h)
+            levels.append({"zone_type": "resistance", "start_idx": i, "bottom": b, "top": t, "tf": tf_label})
+        if lows[i] == np.min(lows[i - lookback : i + lookback + 1]):
+            px = float(lows[i])
+            b, t = _ensure_min_box_height(px - pad, px + pad, min_box_h)
+            levels.append({"zone_type": "support", "start_idx": i, "bottom": b, "top": t, "tf": tf_label})
+    return levels[-4:]
 
 
+def _compute_ob_fvg_overlaps_fallback(df: pd.DataFrame, min_box_h: float) -> list[dict]:
+    if len(df) < 5:
+        return []
+    highs = df["High"].to_numpy(dtype=float)
+    lows = df["Low"].to_numpy(dtype=float)
+    opens = df["Open"].to_numpy(dtype=float)
+    closes = df["Close"].to_numpy(dtype=float)
+
+    fvgs: list[tuple[int, int, float, float]] = []
+    obs: list[tuple[int, int, float, float]] = []
+
+    for i in range(1, len(df) - 1):
+        if lows[i + 1] > highs[i - 
