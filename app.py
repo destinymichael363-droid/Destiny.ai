@@ -128,23 +128,20 @@ def fetch_tf_chart(symbol: str, tf_label: str, lookback_bars: int = 250) -> pd.D
 
 
 def _send_confirmation_email(to_email: str, code: str) -> tuple[bool, str]:
-    smtp_host = os.getenv("SMTP_HOST", "").strip()
-    smtp_port = int(os.getenv("SMTP_PORT", "587"))
-    smtp_user = os.getenv("SMTP_USER", "").strip()
-    smtp_pass = os.getenv("SMTP_PASS", "").strip()
-    smtp_from = os.getenv("SMTP_FROM", smtp_user).strip()
+    secrets_data = _safe_secrets()
 
-    if _notifications is not None:
-        for fn_name in ("send_confirmation_email", "send_email_code", "send_verification_code"):
-            fn = getattr(_notifications, fn_name, None)
-            if callable(fn):
-                try:
-                    res = fn(to_email, code)
-                    if isinstance(res, tuple) and len(res) == 2:
-                        return bool(res[0]), str(res[1])
-                    return True, f"Confirmation code sent to **{to_email}**."
-                except Exception:
-                    pass
+    def _cfg(key: str, default: str = "") -> str:
+        env_val = os.getenv(key, "").strip()
+        if env_val:
+            return env_val
+        sec_val = secrets_data.get(key, default)
+        return str(sec_val).strip() if sec_val is not None else default
+
+    smtp_host = _cfg("SMTP_HOST", "")
+    smtp_port = int(_cfg("SMTP_PORT", "587") or "587")
+    smtp_user = _cfg("SMTP_USER", "")
+    smtp_pass = _cfg("SMTP_PASS", "")
+    smtp_from = _cfg("SMTP_FROM", smtp_user)
 
     if not smtp_host or not smtp_user or not smtp_pass:
         return False, f"SMTP not configured yet. Use confirmation code: **{code}**"
@@ -160,12 +157,15 @@ def _send_confirmation_email(to_email: str, code: str) -> tuple[bool, str]:
             f"Enter this code on the sign-up screen to finish creating your account."
         )
         with smtplib.SMTP(smtp_host, smtp_port, timeout=15) as server:
+            server.ehlo()
             server.starttls()
+            server.ehlo()
             server.login(smtp_user, smtp_pass)
             server.send_message(msg)
         return True, f"Confirmation code sent to **{to_email}**."
     except Exception as exc:
         return False, f"Could not send email ({exc}). Fallback code: **{code}**"
+
 
 
 def _login_session_user(username: str) -> None:
