@@ -5,7 +5,7 @@ import os
 import random
 import smtplib
 import ssl
-import time
+from datetime import datetime, timezone
 from email.message import EmailMessage
 from pathlib import Path
 
@@ -13,6 +13,7 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
+import streamlit.components.v1 as components
 import yfinance as yf
 
 from auth_and_store import authenticate_user, register_user
@@ -122,20 +123,43 @@ def _resample_4h(hourly: pd.DataFrame) -> pd.DataFrame:
         return pd.DataFrame(columns=OHLCV)
 
 
+def _download_history(symbol: str, interval: str, period: str) -> pd.DataFrame:
+    # Try yf.download first (often fresher than Ticker.history), then fall back to Ticker.history
+    try:
+        dl = yf.download(
+            tickers=symbol,
+            period=period,
+            interval=interval,
+            auto_adjust=False,
+            actions=False,
+            progress=False,
+            threads=False,
+        )
+        cleaned = _clean_ohlcv(dl)
+        if not cleaned.empty:
+            return cleaned
+    except Exception:
+        pass
+
+    try:
+        raw = yf.Ticker(symbol).history(period=period, interval=interval, auto_adjust=False, actions=False)
+        return _clean_ohlcv(raw)
+    except Exception:
+        return pd.DataFrame(columns=OHLCV)
+
+
 @st.cache_data(ttl=5)
 def _fetch_1m_chart(symbol: str, lookback_bars: int, nonce: int = 0) -> pd.DataFrame:
     _ = nonce
-    raw = yf.Ticker(symbol).history(period="5d", interval="1m", auto_adjust=False, actions=False)
-    cleaned = _clean_ohlcv(raw)
+    cleaned = _download_history(symbol, interval="1m", period="5d")
     return cleaned.tail(max(100, int(lookback_bars)))
 
 
-@st.cache_data(ttl=20)
+@st.cache_data(ttl=15)
 def _fetch_other_tf_chart(symbol: str, tf_label: str, lookback_bars: int, nonce: int = 0) -> pd.DataFrame:
     _ = nonce
     interval, period = TF_CONFIG.get(tf_label, ("1h", "90d"))
-    raw = yf.Ticker(symbol).history(period=period, interval=interval, auto_adjust=False, actions=False)
-    cleaned = _clean_ohlcv(raw)
+    cleaned = _download_history(symbol, interval=interval, period=period)
     if tf_label == "4H":
         cleaned = _resample_4h(cleaned)
     return cleaned.tail(max(100, int(lookback_bars)))
@@ -154,6 +178,30 @@ def _clear_chart_caches() -> None:
     _fetch_1m_chart.clear()
     _fetch_other_tf_chart.clear()
     fetch_tf_chart.clear()
+
+
+def _inject_auto_reload(interval_sec: int) -> None:
+    ms = max(5, int(interval_sec)) * 1000
+    components.html(
+        f"""
+        <script>
+        (function() {{
+            if (window.__destinyAutoReloadTimer) {{
+                clearTimeout(window.__destinyAutoReloadTimer);
+            }}
+            window.__destinyAutoReloadTimer = setTimeout(function() {{
+                try {{
+                    window.parent.location.reload();
+                }} catch (e) {{
+                    window.location.reload();
+                }}
+            }}, {ms});
+        }})();
+        </script>
+        """,
+        height=0,
+        width=0,
+    )
 
 
 def _get_val(obj: object, names: tuple[str, ...], default: object = None) -> object:
@@ -177,14 +225,17 @@ def _save_virtual_account(username: str, acct: VirtualAccount, closed_log: list[
         for pos in list(getattr(acct, "positions", []) or []):
             sz_val = float(_get_val(pos, ("size", "qty", "quantity", "units"), 1.0))
             units_val = float(_get_val(pos, ("units", "size", "qty", "quantity"), sz_val))
+            entry_v = float(_get_val(pos, ("entry_price", "entry"), 0.0))
+            margin_v = float(_get_val(pos, ("margin_used", "margin", "collateral"), max(0.0, abs(units_val * entry_v) * 0.05)))
             open_list.append({
                 "symbol": str(_get_val(pos, ("symbol",), "")),
                 "side": str(_get_val(pos, ("side",), "LONG")),
-                "entry_price": float(_get_val(pos, ("entry_price", "entry"), 0.0)),
+                "entry_price": entry_v,
                 "stop_loss": float(_get_val(pos, ("stop_loss", "sl"), 0.0)),
                 "take_profit": float(_get_val(pos, ("take_profit", "tp"), 0.0)),
                 "size": sz_val,
                 "units": units_val,
+                "margin_used": margin_v,
             })
         payload = {
             "balance": float(getattr(acct, "balance", 10000.0)),
@@ -217,6 +268,7 @@ def _load_or_init_virtual_account(username: str) -> tuple[VirtualAccount, list[d
                         tp = float(item.get("take_profit", 0.0))
                         sz = float(item.get("size", item.get("units", 1.0)))
                         raw_units = float(item.get("units", sz))
+                        margin_used = float(item.get("margin_used", max(0.0, abs(raw_units * ent) * 0.05)))
                         try:
                             acct.positions.append(
                                 type("SavedPos", (), {
@@ -227,6 +279,7 @@ def _load_or_init_virtual_account(username: str) -> tuple[VirtualAccount, list[d
                                     "take_profit": tp,
                                     "size": sz,
                                     "units": raw_units,
+                                    "margin_used": margin_used,
                                 })()
                             )
                         except Exception:
@@ -1026,7 +1079,6 @@ def _open_virtual_order_safe(
     if ok and hasattr(acct, "balance"):
         post_balance = float(acct.balance)
         deducted = pre_balance - post_balance
-        # Guard against a bug in VirtualAccount that deducts 10x the intended risk (e.g. $2,000 instead of $200)
         if deducted > (intended_risk_dollars * 2.5) and intended_risk_dollars > 0:
             acct.balance = round(pre_balance - intended_risk_dollars, 2)
             msg = f"{msg} (Adjusted risk deduction to ${intended_risk_dollars:,.2f} for {risk_pct:.1f}%.)"
@@ -1052,6 +1104,12 @@ def _close_virtual_position_safe(
     sl_p = float(_get_val(pos, ("stop_loss", "sl"), entry_p))
     tp_p = float(_get_val(pos, ("take_profit", "tp"), entry_p))
     units_val = float(_get_val(pos, ("units", "size", "qty", "quantity"), 1.0))
+
+    if not hasattr(pos, "margin_used"):
+        try:
+            setattr(pos, "margin_used", max(0.0, abs(units_val * entry_p) * 0.05))
+        except Exception:
+            pass
 
     raw_pnl = _get_val(pos, ("pnl", "unrealized_pnl"))
     if raw_pnl is not None:
@@ -1237,8 +1295,8 @@ def _run_app() -> None:
         st.divider()
         default_auto = tf_label == "1M"
         auto_refresh = st.checkbox("Live Auto-Refresh Price", value=default_auto)
-        default_interval = 5 if tf_label == "1M" else 15
-        refresh_sec = st.slider("Refresh Interval (sec)", min_value=5, max_value=60, value=default_interval, step=5)
+        default_interval = 10 if tf_label == "1M" else 15
+        refresh_sec = st.slider("Refresh Interval (sec)", min_value=10, max_value=60, value=default_interval, step=5)
         if st.button("Refresh Price Now"):
             _clear_chart_caches()
             st.session_state["price_nonce"] = int(st.session_state.get("price_nonce", 0)) + 1
@@ -1256,6 +1314,11 @@ def _run_app() -> None:
     nonce = int(st.session_state.get("price_nonce", 0))
     full_df = fetch_tf_chart(symbol, tf_label, lookback_bars=250, nonce=nonce)
     df_chart = full_df.tail(int(visible_bars)).copy() if not full_df.empty else full_df
+
+    if not df_chart.empty:
+        last_bar_ts = str(df_chart.index[-1])
+        now_utc = datetime.now(timezone.utc).strftime("%H:%M:%S UTC")
+        st.caption(f"Last Bar Time: `{last_bar_ts}` | Checked at: `{now_utc}`")
 
     tf_mins = {"1D": 1440, "4H": 240, "1H": 60, "15M": 15, "5M": 5, "1M": 1}.get(tf_label, 15)
     sr_out = _run_sr_engine_safe(df_chart, tf_label=tf_label, invalidation_mode=invalidation_mode)
@@ -1405,10 +1468,7 @@ def _run_app() -> None:
             st.write("No active broker session connected (Virtual Mode active).")
 
     if auto_refresh:
-        time.sleep(int(refresh_sec))
-        _clear_chart_caches()
-        st.session_state["price_nonce"] = int(st.session_state.get("price_nonce", 0)) + 1
-        st.rerun()
+        _inject_auto_reload(int(refresh_sec))
 
 
 def main() -> None:
