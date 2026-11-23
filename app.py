@@ -533,7 +533,7 @@ def build_chart(
     show_bos: bool = True,
     show_ob_fvg_overlap: bool = True,
     show_bsl_ssl: bool = True,
-    initial_visible_bars: int = 80,
+    initial_visible_bars: int = 45,
 ) -> go.Figure:
     fig = go.Figure()
     if df.empty:
@@ -544,7 +544,7 @@ def build_chart(
     x_positions = list(range(n_bars))
     x_end_pos = n_bars - 1
 
-    tick_step = max(1, n_bars // 10)
+    tick_step = max(1, n_bars // 8)
     tick_vals = x_positions[::tick_step]
     tick_texts = [
         pd.Timestamp(df.index[i]).strftime("%m-%d %H:%M" if tf_label != "1D" else "%Y-%m-%d")
@@ -552,7 +552,7 @@ def build_chart(
     ]
 
     price_range = max(float(df["High"].max() - df["Low"].min()), 1e-6)
-    min_box_h = price_range * 0.016
+    min_box_h = price_range * 0.014
 
     fig.add_trace(
         go.Candlestick(
@@ -562,13 +562,222 @@ def build_chart(
             low=df["Low"],
             close=df["Close"],
             name=f"{tf_label} Candles",
-            increasing=dict(line=dict(color="#26A69A", width=1.8), fillcolor="#26A69A"),
-            decreasing=dict(line=dict(color="#EF5350", width=1.8), fillcolor="#EF5350"),
-            whiskerwidth=0.45,
+            increasing=dict(line=dict(color="#26A69A", width=2.2), fillcolor="#26A69A"),
+            decreasing=dict(line=dict(color="#EF5350", width=2.2), fillcolor="#EF5350"),
+            whiskerwidth=0.5,
         )
     )
 
+    # Live / latest price line tracking the most recent candle close
+    last_close = float(df["Close"].iloc[-1])
+    fig.add_hline(
+        y=last_close,
+        line=dict(color="#FFFFFF", width=1.3, dash="dot"),
+        annotation_text=f"Price: {last_close:.5f}",
+        annotation_position="top right",
+        annotation_font=dict(size=10, color="#FFFFFF"),
+    )
+
     used_label_y: list[float] = []
+
+    def _ok_label(y_val: float) -> bool:
+        if any(abs(y_val - py) < price_range * 0.036 for py in used_label_y):
+            return False
+        used_label_y.append(y_val)
+        return True
+
+    # Primary S/R zones (with fallback to minor/swing S/R if sr_engine returns none)
+    active_sr = _filter_close_invalidated_sr(df, list(sr_zones or []))
+    if not active_sr:
+        active_sr = _compute_minor_sr_fallback(df, tf_label, min_box_h)
+
+    for sz in active_sr[-4:]:
+        z_type = str(_get_val(sz, ("zone_type", "kind", "side"), "support")).lower()
+        is_sup = "sup" in z_type or "demand" in z_type or "bull" in z_type
+        fill_c = "rgba(38, 166, 154, 0.25)" if is_sup else "rgba(239, 83, 80, 0.25)"
+        line_c = "rgba(77, 208, 225, 0.95)" if is_sup else "rgba(255, 112, 67, 0.95)"
+
+        pos = _resolve_bar_pos(df, sz, ("start_idx", "idx", "bar_index", "start_bar", "time", "timestamp"))
+        fallback_px = float(_get_val(sz, ("price", "level", "y"), last_close))
+        raw_b = float(_get_val(sz, ("bottom", "low"), fallback_px))
+        raw_t = float(_get_val(sz, ("top", "high"), fallback_px))
+        box_b, box_t = _ensure_min_box_height(raw_b, raw_t, min_box_h)
+        z_tf = str(_get_val(sz, ("tf", "timeframe"), tf_label))
+
+        lbl = f"{'SUP' if is_sup else 'RES'} [{z_tf}]"
+        _add_zone_box(
+            fig=fig,
+            x0_pos=pos,
+            x1_pos=x_end_pos + 2,
+            y_bot=box_b,
+            y_top=box_t,
+            fill_rgba=fill_c,
+            line_rgba=line_c,
+            label_text=lbl if _ok_label((box_b + box_t) / 2.0) else f"[{z_tf}]",
+            label_color=line_c,
+            dash="solid",
+        )
+
+    if show_minor_sr:
+        minor_list = list(minor_sr_zones or []) or _compute_minor_sr_fallback(df, tf_label, min_box_h)
+        active_minor = _filter_close_invalidated_sr(df, minor_list)
+        for mz in active_minor[-4:]:
+            z_type = str(_get_val(mz, ("zone_type", "kind", "side"), "support")).lower()
+            is_sup = "sup" in z_type or "demand" in z_type
+            m_fill = "rgba(129, 199, 132, 0.18)" if is_sup else "rgba(255, 183, 77, 0.18)"
+            m_line = "rgba(165, 214, 167, 0.90)" if is_sup else "rgba(255, 202, 40, 0.90)"
+
+            m_pos = _resolve_bar_pos(df, mz, ("start_idx", "idx", "bar_index", "start_bar", "time", "timestamp"))
+            m_fb = float(_get_val(mz, ("price", "level", "y"), last_close))
+            raw_mb = float(_get_val(mz, ("bottom", "low"), m_fb))
+            raw_mt = float(_get_val(mz, ("top", "high"), m_fb))
+            m_bot, m_top = _ensure_min_box_height(raw_mb, raw_mt, min_box_h)
+            m_tf = str(_get_val(mz, ("tf", "timeframe"), tf_label))
+
+            m_lbl = f"Minor {'S' if is_sup else 'R'} [{m_tf}]"
+            _add_zone_box(
+                fig=fig,
+                x0_pos=m_pos,
+                x1_pos=x_end_pos + 2,
+                y_bot=m_bot,
+                y_top=m_top,
+                fill_rgba=m_fill,
+                line_rgba=m_line,
+                label_text=m_lbl if _ok_label((m_bot + m_top) / 2.0) else f"M-[{m_tf}]",
+                label_color=m_line,
+                dash="dash",
+            )
+
+    if show_ob_fvg_overlap:
+        overlaps = list(paired_zones or []) or _compute_ob_fvg_overlaps_fallback(df, min_box_h)
+        for pz in overlaps[-3:]:
+            direction = int(_get_val(pz, ("direction",), 1))
+            fill_c = "rgba(66, 165, 245, 0.25)" if direction >= 0 else "rgba(171, 71, 188, 0.25)"
+            line_c = "rgba(100, 181, 246, 0.95)" if direction >= 0 else "rgba(206, 147, 216, 0.95)"
+
+            ov_low = _get_val(pz, ("overlap_low",))
+            ov_high = _get_val(pz, ("overlap_high",))
+            if ov_low is not None and ov_high is not None:
+                y_low, y_high = _ensure_min_box_height(float(ov_low), float(ov_high), min_box_h * 1.35)
+                tag_txt = f"OB+FVG [{tf_label}]"
+            else:
+                ob_l = float(_get_val(pz, ("ob_low", "bottom"), last_close))
+                ob_h = float(_get_val(pz, ("ob_high", "top"), last_close))
+                fvg_l = float(_get_val(pz, ("fvg_low", "bottom"), ob_l))
+                fvg_h = float(_get_val(pz, ("fvg_high", "top"), ob_h))
+                y_low, y_high = _ensure_min_box_height(min(ob_l, fvg_l), max(ob_h, fvg_h), min_box_h * 1.35)
+                tag_txt = f"OB/FVG [{tf_label}]"
+
+            pos = _resolve_bar_pos(df, pz, ("ob_start_idx", "start_idx", "idx", "bar_index", "time", "timestamp"))
+            _add_zone_box(
+                fig=fig,
+                x0_pos=pos,
+                x1_pos=x_end_pos + 2,
+                y_bot=y_low,
+                y_top=y_high,
+                fill_rgba=fill_c,
+                line_rgba=line_c,
+                label_text=tag_txt if _ok_label((y_low + y_high) / 2.0) else f"[{tf_label}]",
+                label_color=line_c,
+                dash="dot",
+            )
+
+    if show_bsl_ssl:
+        liq_list = list(bsl_ssl_items or []) or _compute_bsl_ssl_fallback(df)
+        for item in liq_list[-4:]:
+            if isinstance(item, (tuple, list)) and len(item) >= 4:
+                x0_i, x1_i, lvl_val, tag_str = int(item[0]), int(item[1]), float(item[2]), str(item[3])
+            else:
+                x0_i = _resolve_bar_pos(df, item, ("start_idx", "idx", "bar_index", "time"))
+                x1_i = x_end_pos
+                lvl_val = float(_get_val(item, ("price", "level", "y"), last_close))
+                tag_str = str(_get_val(item, ("kind", "label", "side"), "BSL")).upper()
+
+            is_bsl = "BSL" in tag_str or "BUY" in tag_str
+            liq_color = "#29B6F6" if is_bsl else "#FFA726"
+            fig.add_trace(
+                go.Scatter(
+                    x=[x0_i, x1_i],
+                    y=[lvl_val, lvl_val],
+                    mode="lines",
+                    line=dict(color=liq_color, dash="longdash", width=1.4),
+                    name=tag_str,
+                    showlegend=False,
+                )
+            )
+            if _ok_label(lvl_val):
+                fig.add_annotation(
+                    xref="x",
+                    yref="y",
+                    x=x1_i,
+                    y=lvl_val,
+                    text=f"{tag_str} [{tf_label}]",
+                    showarrow=False,
+                    xanchor="left",
+                    yanchor="middle",
+                    font=dict(size=10, color=liq_color),
+                )
+
+    if show_bos:
+        bos_items: list[tuple[int, int, float, str]] = []
+        if sig_df is not None and not sig_df.empty and "bos_level" in sig_df.columns:
+            bos_rows = sig_df[sig_df["bos_level"].notna()].tail(4)
+            for idx_pos, row in bos_rows.iterrows():
+                if idx_pos in df.index:
+                    b_pos = int(df.index.get_loc(idx_pos))
+                    bos_items.append((b_pos, x_end_pos, float(row["bos_level"]), f"BOS [{tf_label}]"))
+        if not bos_items:
+            bos_items = [(xs, xb, lvl, f"{lbl} [{tf_label}]") for xs, xb, lvl, lbl in _compute_bos_fallback(df)]
+
+        for x_start, x_brk, lvl, lbl in bos_items[-3:]:
+            fig.add_trace(
+                go.Scatter(
+                    x=[x_start, x_brk],
+                    y=[lvl, lvl],
+                    mode="lines",
+                    line=dict(color="#FFEE58", dash="dash", width=1.4),
+                    name="BOS",
+                    showlegend=False,
+                )
+            )
+            if _ok_label(lvl):
+                fig.add_annotation(
+                    xref="x",
+                    yref="y",
+                    x=x_brk,
+                    y=lvl,
+                    text=lbl,
+                    showarrow=False,
+                    xanchor="right",
+                    yanchor="bottom",
+                    font=dict(size=10, color="#FFEE58"),
+                )
+
+    x_start_view = max(0, n_bars - int(initial_visible_bars))
+    fig.update_layout(
+        title=title,
+        template="plotly_dark",
+        dragmode="pan",
+        xaxis_rangeslider_visible=False,
+        height=600,
+        margin=dict(l=8, r=110, t=44, b=24),
+        xaxis=dict(
+            tickmode="array",
+            tickvals=tick_vals,
+            ticktext=tick_texts,
+            range=[x_start_view, x_end_pos + 4],
+            fixedrange=False,
+            showgrid=True,
+            gridcolor="rgba(255,255,255,0.06)",
+        ),
+        yaxis=dict(
+            fixedrange=False,
+            showgrid=True,
+            gridcolor="rgba(255,255,255,0.06)",
+        ),
+    )
+    return fig
+
 
     def _ok_label(y_val: float) -> bool:
         if any(abs(y_val - py) < price_range * 0.036 for py in used_label_y):
