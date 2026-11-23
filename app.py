@@ -22,13 +22,11 @@ from sr_engine import run_sr_zones_engine
 st.set_page_config(page_title="DESTINY AI — 5-TF Scalp & Account Studio", layout="wide")
 
 WATCHLIST: dict[str, str] = {
-    # Commodities
     "Gold (XAU)": "GC=F",
     "Silver (XAG)": "SI=F",
     "Crude Oil (WTI)": "CL=F",
     "Brent Oil": "BZ=F",
     "Natural Gas": "NG=F",
-    # Major & Cross Forex Pairs
     "EUR/USD": "EURUSD=X",
     "GBP/USD": "GBPUSD=X",
     "USD/JPY": "USDJPY=X",
@@ -38,21 +36,27 @@ WATCHLIST: dict[str, str] = {
     "CAD/JPY": "CADJPY=X",
     "CAD/CHF": "CADCHF=X",
     "GBP/NZD": "GBPNZD=X",
-    # Crypto
     "Bitcoin (BTC)": "BTC-USD",
     "Ethereum (ETH)": "ETH-USD",
 }
 
 TF_CONFIG: dict[str, tuple[str, str]] = {
-    "1D": ("1d", "5y"),
-    "4H": ("1h", "730d"),
-    "1H": ("1h", "365d"),
-    "15M": ("15m", "60d"),
-    "5M": ("5m", "60d"),
-    "1M": ("1m", "7d"),
+    "1D": ("1d", "2y"),
+    "4H": ("1h", "180d"),
+    "1H": ("1h", "90d"),
+    "15M": ("15m", "30d"),
+    "5M": ("5m", "14d"),
+    "1M": ("1m", "5d"),
 }
 
 OHLCV = ["Open", "High", "Low", "Close", "Volume"]
+
+
+def _safe_secrets() -> dict:
+    try:
+        return dict(st.secrets)
+    except Exception:
+        return {}
 
 
 def _clean_ohlcv(df: pd.DataFrame | None) -> pd.DataFrame:
@@ -97,15 +101,15 @@ def _resample_4h(hourly: pd.DataFrame) -> pd.DataFrame:
         return pd.DataFrame(columns=OHLCV)
 
 
-@st.cache_data(ttl=30)
-def fetch_tf_chart(symbol: str, tf_label: str, lookback_bars: int = 600) -> pd.DataFrame:
-    interval, period = TF_CONFIG.get(tf_label, ("1h", "365d"))
+@st.cache_data(ttl=45)
+def fetch_tf_chart(symbol: str, tf_label: str, lookback_bars: int = 250) -> pd.DataFrame:
+    interval, period = TF_CONFIG.get(tf_label, ("1h", "90d"))
     try:
         raw = yf.Ticker(symbol).history(period=period, interval=interval, auto_adjust=False, actions=False)
         cleaned = _clean_ohlcv(raw)
         if tf_label == "4H":
             cleaned = _resample_4h(cleaned)
-        return cleaned.tail(max(150, int(lookback_bars)))
+        return cleaned.tail(max(100, int(lookback_bars)))
     except Exception:
         return pd.DataFrame(columns=OHLCV)
 
@@ -148,7 +152,8 @@ def _login_session_user(username: str) -> None:
 
 def _render_google_auth_section() -> None:
     has_st_login = hasattr(st, "login") and hasattr(st, "user")
-    auth_cfg = st.secrets.get("auth", {}) if hasattr(st, "secrets") else {}
+    secrets_data = _safe_secrets()
+    auth_cfg = secrets_data.get("auth", {}) if isinstance(secrets_data, dict) else {}
     google_configured = bool(auth_cfg.get("google") or os.getenv("GOOGLE_OAUTH_ENABLED", "").lower() == "true")
 
     if has_st_login and getattr(st.user, "is_logged_in", False):
@@ -383,145 +388,3 @@ def _compute_bos_fallback(df: pd.DataFrame) -> list[tuple[int, int, float, str]]
     bos_events: list[tuple[int, int, float, str]] = []
 
     for i in range(swing_n, len(df) - swing_n):
-        if highs[i] == np.max(highs[i - swing_n : i + swing_n + 1]):
-            last_swing_high = (i, float(highs[i]))
-        if lows[i] == np.min(lows[i - swing_n : i + swing_n + 1]):
-            last_swing_low = (i, float(lows[i]))
-
-    for i in range(swing_n + 1, len(df)):
-        if last_swing_high is not None and i > last_swing_high[0] and closes[i] > last_swing_high[1]:
-            bos_events.append((last_swing_high[0], i, last_swing_high[1], "BOS ↑"))
-            last_swing_high = None
-        if last_swing_low is not None and i > last_swing_low[0] and closes[i] < last_swing_low[1]:
-            bos_events.append((last_swing_low[0], i, last_swing_low[1], "BOS ↓"))
-            last_swing_low = None
-
-    return bos_events[-4:]
-
-
-def _compute_bsl_ssl_fallback(df: pd.DataFrame) -> list[tuple[int, int, float, str]]:
-    """Finds resting Buy-Side Liquidity (BSL above swing highs) and Sell-Side Liquidity (SSL below swing lows)."""
-    if len(df) < 12:
-        return []
-    n = 4
-    highs = df["High"].to_numpy(dtype=float)
-    lows = df["Low"].to_numpy(dtype=float)
-    n_bars = len(df) - 1
-    levels: list[tuple[int, int, float, str]] = []
-
-    for i in range(n, len(df) - n):
-        if highs[i] == np.max(highs[i - n : i + n + 1]):
-            px = float(highs[i])
-            # Keep resting BSL if price hasn't swept above it yet
-            if float(np.max(highs[i + 1 :])) <= px:
-                levels.append((i, n_bars, px, "BSL"))
-        if lows[i] == np.min(lows[i - n : i + n + 1]):
-            px = float(lows[i])
-            # Keep resting SSL if price hasn't swept below it yet
-            if float(np.min(lows[i + 1 :])) >= px:
-                levels.append((i, n_bars, px, "SSL"))
-
-    return levels[-4:]
-
-
-def _add_zone_box(
-    fig: go.Figure,
-    x0_pos: int,
-    x1_pos: int,
-    y_bot: float,
-    y_top: float,
-    fill_rgba: str,
-    line_rgba: str,
-    label_text: str,
-    label_color: str,
-    dash: str = "solid",
-) -> None:
-    fig.add_shape(
-        type="rect",
-        xref="x",
-        yref="y",
-        x0=x0_pos,
-        x1=x1_pos,
-        y0=y_bot,
-        y1=y_top,
-        fillcolor=fill_rgba,
-        line=dict(color=line_rgba, width=1.6, dash=dash),
-        layer="below",
-    )
-    fig.add_annotation(
-        xref="x",
-        yref="y",
-        x=x1_pos,
-        y=(y_bot + y_top) / 2.0,
-        text=label_text,
-        showarrow=False,
-        xanchor="left",
-        yanchor="middle",
-        bgcolor="rgba(18, 22, 30, 0.88)",
-        bordercolor=line_rgba,
-        borderwidth=1,
-        font=dict(size=10, color=label_color),
-    )
-
-
-def build_chart(
-    df: pd.DataFrame,
-    title: str,
-    tf_label: str,
-    sr_zones: list,
-    minor_sr_zones: list,
-    paired_zones: list,
-    sig_df: pd.DataFrame,
-    bsl_ssl_items: list | None = None,
-    show_minor_sr: bool = True,
-    show_bos: bool = True,
-    show_ob_fvg_overlap: bool = True,
-    show_bsl_ssl: bool = True,
-    initial_visible_bars: int = 85,
-) -> go.Figure:
-    fig = go.Figure()
-    if df.empty:
-        fig.update_layout(title=f"{title} (No data)", template="plotly_dark", height=640)
-        return fig
-
-    n_bars = len(df)
-    x_positions = list(range(n_bars))
-    x_end_pos = n_bars - 1
-
-    tick_step = max(1, n_bars // 12)
-    tick_vals = x_positions[::tick_step]
-    tick_texts = [
-        pd.Timestamp(df.index[i]).strftime("%m-%d %H:%M" if tf_label != "1D" else "%Y-%m-%d")
-        for i in tick_vals
-    ]
-
-    price_range = max(float(df["High"].max() - df["Low"].min()), 1e-6)
-    min_box_h = price_range * 0.016
-
-    # Bigger, high-contrast candlesticks for clear viewing on mobile and desktop
-    fig.add_trace(
-        go.Candlestick(
-            x=x_positions,
-            open=df["Open"],
-            high=df["High"],
-            low=df["Low"],
-            close=df["Close"],
-            name=f"{tf_label} Candles",
-            increasing=dict(line=dict(color="#26A69A", width=1.8), fillcolor="#26A69A"),
-            decreasing=dict(line=dict(color="#EF5350", width=1.8), fillcolor="#EF5350"),
-            whiskerwidth=0.45,
-        )
-    )
-
-    used_label_y: list[float] = []
-
-    def _ok_label(y_val: float) -> bool:
-        if any(abs(y_val - py) < price_range * 0.036 for py in used_label_y):
-            return False
-        used_label_y.append(y_val)
-        return True
-
-    # 1. Major S/R Boxes (invalidated by candle close, TF printed on box)
-    active_sr = _filter_close_invalidated_sr(df, sr_zones)
-    for sz in active_sr[-4:]:
-        z_
