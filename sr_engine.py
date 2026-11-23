@@ -1,196 +1,113 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal
-
 import numpy as np
 import pandas as pd
 
 
 @dataclass
 class SRZone:
-    zone_type: Literal["resistance", "support"]  # 1 = resistance, -1 = support
-    top: float
+    zone_type: str      # "support" or "resistance"
     bottom: float
-    created_bar_index: int
-    pivot_bar_index: int
-    touch_count: int = 0
-    state: int = 0  # 0 = waiting for first touch, 1 = inside zone, 2 = left zone, waiting for next visit
-    is_strong: bool = False
+    top: float
+    start_idx: int
+    tf: str = ""
+    strength: int = 1
+    invalidated: bool = False
+    end_idx: int | None = None
 
 
-def compute_atr(df: pd.DataFrame, atr_length: int = 14) -> pd.Series:
-    """Wilder's ATR matching Pine Script's ta.atr(atrLength)."""
-    high = df["High"].astype(float)
-    low = df["Low"].astype(float)
-    close = df["Close"].astype(float)
-    prev_close = close.shift(1)
+def _is_broken(
+    zone_type: str,
+    bottom: float,
+    top: float,
+    high_val: float,
+    low_val: float,
+    close_val: float,
+    invalidation_mode: str,
+) -> bool:
+    mode = (invalidation_mode or "Wick").strip().lower()
+    check_high = high_val if mode == "wick" else close_val
+    check_low = low_val if mode == "wick" else close_val
 
-    tr = pd.concat(
-        [
-            high - low,
-            (high - prev_close).abs(),
-            (low - prev_close).abs(),
-        ],
-        axis=1,
-    ).max(axis=1)
-
-    # Wilder's RMA equivalent to ta.rma(ta.tr, atrLength)
-    return tr.ewm(alpha=1.0 / atr_length, min_periods=atr_length, adjust=False).mean()
-
-
-def find_pivots(series: pd.Series, left_len: int, right_len: int) -> pd.Series:
-    """
-    Non-repainting pivot detector matching ta.pivothigh / ta.pivotlow:
-    A pivot at index `p` is confirmed at index `p + right_len` once `right_len`
-    subsequent bars have formed. Returns the pivot value placed at the
-    *confirmation* bar index so there is zero lookahead bias.
-    """
-    values = series.to_numpy(dtype=float)
-    n = len(values)
-    confirmed = np.full(n, np.nan, dtype=float)
-
-    for p in range(left_len, n - right_len):
-        center = values[p]
-        if np.isnan(center):
-            continue
-        left_window = values[p - left_len : p]
-        right_window = values[p + 1 : p + right_len + 1]
-
-        if np.all(center > left_window) and np.all(center >= right_window):
-            confirmed[p + right_len] = center
-
-    return pd.Series(confirmed, index=series.index)
+    # Support breaks downward when price pierces/closes below bottom
+    if zone_type == "support":
+        return check_low < bottom
+    # Resistance breaks upward when price pierces/closes above top
+    return check_high > top
 
 
 def run_sr_zones_engine(
     df: pd.DataFrame,
-    length: int = 8,
-    strength: int = 3,
-    atr_length: int = 14,
-    invalidation_mode: Literal["Wick", "Close"] = "Wick",
-    max_zones: int = 40,
+    tf_label: str = "15M",
+    swing_length: int = 5,
+    invalidation_mode: str = "Wick",
+    max_active_zones: int = 4,
 ) -> dict:
-    """
-    Runs your 'Swing S/R Zones - destiny Style v2' logic bar-by-bar.
-    Expects a DataFrame with columns: Open, High, Low, Close.
-    """
-    required = ["Open", "High", "Low", "Close"]
-    if df is None or df.empty or not all(col in df.columns for col in required):
-        return {
-            "active_zones": [],
-            "events_df": pd.DataFrame(),
-        }
+    if df is None or df.empty or len(df) < (swing_length * 2 + 2):
+        return {"active_zones": [], "minor_zones": [], "all_zones": []}
 
-    data = df.copy()
-    atr = compute_atr(data, atr_length=atr_length)
-    pivot_highs = find_pivots(data["High"], length, length)
-    pivot_lows = find_pivots(data["Low"], length, length)
+    highs = df["High"].to_numpy(dtype=float)
+    lows = df["Low"].to_numpy(dtype=float)
+    closes = df["Close"].to_numpy(dtype=float)
+    n_bars = len(df)
 
-    highs = data["High"].to_numpy(dtype=float)
-    lows = data["Low"].to_numpy(dtype=float)
-    closes = data["Close"].to_numpy(dtype=float)
-    atr_vals = atr.to_numpy(dtype=float)
-    ph_vals = pivot_highs.to_numpy(dtype=float)
-    pl_vals = pivot_lows.to_numpy(dtype=float)
+    price_range = max(float(np.max(highs) - np.min(lows)), 1e-6)
+    pad = price_range * 0.006
 
-    zones: list[SRZone] = []
-    bar_records: list[dict] = []
+    candidates: list[SRZone] = []
 
-    for i in range(len(data)):
-        h = highs[i]
-        l = lows[i]
-        c = closes[i]
-
-        resistance_invalidated = False
-        support_invalidated = False
-        new_rejections = 0
-
-        # 1. Create Resistance zone on confirmed pivot high
-        atr_at_pivot = atr_vals[i - length] if i >= length else np.nan
-        if not np.isnan(ph_vals[i]) and not np.isnan(atr_at_pivot):
-            top = float(ph_vals[i])
-            bottom = float(top - atr_at_pivot)
-            zones.append(
+    for i in range(swing_length, n_bars - swing_length):
+        if highs[i] == np.max(highs[i - swing_length : i + swing_length + 1]):
+            px = float(highs[i])
+            candidates.append(
                 SRZone(
                     zone_type="resistance",
-                    top=top,
-                    bottom=bottom,
-                    created_bar_index=i,
-                    pivot_bar_index=i - length,
-                    touch_count=0,
-                    state=0,
-                    is_strong=False,
+                    bottom=px - pad,
+                    top=px + pad,
+                    start_idx=i,
+                    tf=tf_label,
+                    strength=1,
                 )
             )
-
-        # 2. Create Support zone on confirmed pivot low
-        if not np.isnan(pl_vals[i]) and not np.isnan(atr_at_pivot):
-            bottom = float(pl_vals[i])
-            top = float(bottom + atr_at_pivot)
-            zones.append(
+        if lows[i] == np.min(lows[i - swing_length : i + swing_length + 1]):
+            px = float(lows[i])
+            candidates.append(
                 SRZone(
                     zone_type="support",
-                    top=top,
-                    bottom=bottom,
-                    created_bar_index=i,
-                    pivot_bar_index=i - length,
-                    touch_count=0,
-                    state=0,
-                    is_strong=False,
+                    bottom=px - pad,
+                    top=px + pad,
+                    start_idx=i,
+                    tf=tf_label,
+                    strength=1,
                 )
             )
 
-        # 3. Rejection counting and invalidation (reverse iteration like Pine loop)
-        for idx in range(len(zones) - 1, -1, -1):
-            z = zones[idx]
+    evaluated: list[SRZone] = []
+    for zone in candidates:
+        broken_at: int | None = None
+        for j in range(zone.start_idx + 1, n_bars):
+            if _is_broken(
+                zone_type=zone.zone_type,
+                bottom=zone.bottom,
+                top=zone.top,
+                high_val=float(highs[j]),
+                low_val=float(lows[j]),
+                close_val=float(closes[j]),
+                invalidation_mode=invalidation_mode,
+            ):
+                broken_at = j
+                break
 
-            if z.zone_type == "resistance":
-                invalid = (h > z.top) if invalidation_mode == "Wick" else (c > z.top)
-            else:
-                invalid = (l < z.bottom) if invalidation_mode == "Wick" else (c < z.bottom)
+        zone.invalidated = broken_at is not None
+        zone.end_idx = broken_at if broken_at is not None else (n_bars - 1)
+        evaluated.append(zone)
 
-            if invalid:
-                if z.zone_type == "resistance":
-                    resistance_invalidated = True
-                else:
-                    support_invalidated = True
-                zones.pop(idx)
-                continue
+    active_zones = [z for z in evaluated if not z.invalidated][-max_active_zones:]
+    minor_zones = [z for z in evaluated if not z.invalidated][-(max_active_zones * 2) : -max_active_zones]
 
-            inside = (h >= z.bottom) and (l <= z.top)
-            rejected = (c < z.bottom) if z.zone_type == "resistance" else (c > z.top)
-
-            if z.state == 0 and inside:
-                z.state = 1
-
-            if z.state == 1:
-                left_zone = (h < z.bottom) if z.zone_type == "resistance" else (l > z.top)
-                if left_zone:
-                    z.state = 2
-
-            if z.state == 2 and inside and rejected:
-                z.touch_count += 1
-                z.state = 1
-                z.is_strong = z.touch_count >= strength
-                new_rejections += 1
-
-        # 4. Enforce maximum zone limit (drop oldest first, matching array.shift)
-        while len(zones) > max_zones:
-            zones.pop(0)
-
-        bar_records.append(
-            {
-                "timestamp": data.index[i],
-                "active_zone_count": len(zones),
-                "resistance_invalidated": resistance_invalidated,
-                "support_invalidated": support_invalidated,
-                "new_rejections": new_rejections,
-            }
-        )
-
-    events_df = pd.DataFrame(bar_records).set_index("timestamp")
     return {
-        "active_zones": zones,
-        "events_df": events_df,
+        "active_zones": active_zones,
+        "minor_zones": minor_zones,
+        "all_zones": evaluated,
     }
