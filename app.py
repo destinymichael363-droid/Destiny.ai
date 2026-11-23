@@ -316,4 +316,6 @@ def _filter_close_invalidated_sr(df: pd.DataFrame, zones: list) -> list:
     return valid_zones
 
 
-def _compute_minor_sr_fallback(df: pd.DataFrame, tf_label: str, min_box_h: float) -> list
+def _compute_minor_sr_fallback(df: pd.DataFrame, tf_label: str, min_box_h: float) -> list[dict]:
+
+
