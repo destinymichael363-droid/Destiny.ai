@@ -122,17 +122,38 @@ def _resample_4h(hourly: pd.DataFrame) -> pd.DataFrame:
         return pd.DataFrame(columns=OHLCV)
 
 
-@st.cache_data(ttl=15)
-def fetch_tf_chart(symbol: str, tf_label: str, lookback_bars: int = 250) -> pd.DataFrame:
+@st.cache_data(ttl=5)
+def _fetch_1m_chart(symbol: str, lookback_bars: int, nonce: int = 0) -> pd.DataFrame:
+    _ = nonce
+    raw = yf.Ticker(symbol).history(period="5d", interval="1m", auto_adjust=False, actions=False)
+    cleaned = _clean_ohlcv(raw)
+    return cleaned.tail(max(100, int(lookback_bars)))
+
+
+@st.cache_data(ttl=20)
+def _fetch_other_tf_chart(symbol: str, tf_label: str, lookback_bars: int, nonce: int = 0) -> pd.DataFrame:
+    _ = nonce
     interval, period = TF_CONFIG.get(tf_label, ("1h", "90d"))
+    raw = yf.Ticker(symbol).history(period=period, interval=interval, auto_adjust=False, actions=False)
+    cleaned = _clean_ohlcv(raw)
+    if tf_label == "4H":
+        cleaned = _resample_4h(cleaned)
+    return cleaned.tail(max(100, int(lookback_bars)))
+
+
+def fetch_tf_chart(symbol: str, tf_label: str, lookback_bars: int = 250, nonce: int = 0) -> pd.DataFrame:
     try:
-        raw = yf.Ticker(symbol).history(period=period, interval=interval, auto_adjust=False, actions=False)
-        cleaned = _clean_ohlcv(raw)
-        if tf_label == "4H":
-            cleaned = _resample_4h(cleaned)
-        return cleaned.tail(max(100, int(lookback_bars)))
+        if tf_label == "1M":
+            return _fetch_1m_chart(symbol, lookback_bars, nonce=nonce)
+        return _fetch_other_tf_chart(symbol, tf_label, lookback_bars, nonce=nonce)
     except Exception:
         return pd.DataFrame(columns=OHLCV)
+
+
+def _clear_chart_caches() -> None:
+    _fetch_1m_chart.clear()
+    _fetch_other_tf_chart.clear()
+    fetch_tf_chart.clear()
 
 
 def _get_val(obj: object, names: tuple[str, ...], default: object = None) -> object:
@@ -597,6 +618,110 @@ def _add_zone_box(
     )
 
 
+def _add_trade_levels_to_chart(
+    fig: go.Figure,
+    symbol: str,
+    x_end_pos: int,
+    open_positions: list | None,
+    closed_positions: list | None,
+) -> None:
+    for idx, pos in enumerate(list(open_positions or []), start=1):
+        p_sym = str(_get_val(pos, ("symbol",), ""))
+        if p_sym != symbol:
+            continue
+        p_side = str(_get_val(pos, ("side",), "LONG")).upper()
+        p_entry = float(_get_val(pos, ("entry_price", "entry"), 0.0))
+        p_sl = float(_get_val(pos, ("stop_loss", "sl"), 0.0))
+        p_tp = float(_get_val(pos, ("take_profit", "tp"), 0.0))
+
+        if p_entry > 0:
+            fig.add_trace(
+                go.Scatter(
+                    x=[0, x_end_pos],
+                    y=[p_entry, p_entry],
+                    mode="lines",
+                    line=dict(color="#4FC3F7", width=1.6, dash="solid"),
+                    showlegend=False,
+                )
+            )
+            fig.add_annotation(
+                xref="x",
+                yref="y",
+                x=x_end_pos,
+                y=p_entry,
+                text=f"#{idx} OPEN {p_side} {p_entry:.5f}",
+                showarrow=False,
+                xanchor="right",
+                yanchor="bottom",
+                bgcolor="rgba(13, 71, 161, 0.85)",
+                font=dict(size=10, color="#FFFFFF"),
+            )
+        if p_sl > 0:
+            fig.add_trace(
+                go.Scatter(
+                    x=[0, x_end_pos],
+                    y=[p_sl, p_sl],
+                    mode="lines",
+                    line=dict(color="#FF5252", width=1.4, dash="dash"),
+                    showlegend=False,
+                )
+            )
+            fig.add_annotation(
+                xref="x",
+                yref="y",
+                x=x_end_pos,
+                y=p_sl,
+                text=f"#{idx} SL {p_sl:.5f}",
+                showarrow=False,
+                xanchor="right",
+                yanchor="top",
+                bgcolor="rgba(183, 28, 28, 0.85)",
+                font=dict(size=10, color="#FFFFFF"),
+            )
+        if p_tp > 0:
+            fig.add_trace(
+                go.Scatter(
+                    x=[0, x_end_pos],
+                    y=[p_tp, p_tp],
+                    mode="lines",
+                    line=dict(color="#69F0AE", width=1.4, dash="dash"),
+                    showlegend=False,
+                )
+            )
+            fig.add_annotation(
+                xref="x",
+                yref="y",
+                x=x_end_pos,
+                y=p_tp,
+                text=f"#{idx} TP {p_tp:.5f}",
+                showarrow=False,
+                xanchor="right",
+                yanchor="bottom",
+                bgcolor="rgba(27, 94, 32, 0.85)",
+                font=dict(size=10, color="#FFFFFF"),
+            )
+
+    for c_idx, item in enumerate(list(closed_positions or [])[-3:], start=1):
+        c_sym = str(_get_val(item, ("symbol",), ""))
+        if c_sym != symbol:
+            continue
+        c_exit = float(_get_val(item, ("exit_price", "exit"), 0.0))
+        c_pnl = float(_get_val(item, ("pnl", "realized_pnl"), 0.0))
+        if c_exit > 0:
+            fig.add_trace(
+                go.Scatter(
+                    x=[x_end_pos],
+                    y=[c_exit],
+                    mode="markers+text",
+                    marker=dict(size=9, color="#69F0AE" if c_pnl >= 0 else "#FF5252", symbol="diamond"),
+                    text=[f"Closed #{c_idx} ({c_pnl:+.2f})"],
+                    textposition="top left",
+                    textfont=dict(size=10, color="#FFFFFF"),
+                    showlegend=False,
+                )
+            )
+
+
 def build_chart(
     df: pd.DataFrame,
     title: str,
@@ -611,6 +736,9 @@ def build_chart(
     show_ob_fvg_overlap: bool = True,
     show_bsl_ssl: bool = True,
     invalidation_mode: str = "Wick",
+    symbol: str = "",
+    open_positions: list | None = None,
+    closed_positions: list | None = None,
 ) -> go.Figure:
     fig = go.Figure()
     if df.empty:
@@ -652,6 +780,14 @@ def build_chart(
         annotation_text=f"Price: {last_close:.5f}",
         annotation_position="top right",
         annotation_font=dict(size=10, color="#FFFFFF"),
+    )
+
+    _add_trade_levels_to_chart(
+        fig=fig,
+        symbol=symbol,
+        x_end_pos=x_end_pos,
+        open_positions=open_positions,
+        closed_positions=closed_positions,
     )
 
     used_label_y: list[float] = []
@@ -876,13 +1012,26 @@ def _open_virtual_order_safe(
     tp_px: float,
     risk_pct: float,
 ) -> tuple[bool, str]:
+    pre_balance = float(getattr(acct, "balance", 10000.0))
+    intended_risk_dollars = pre_balance * (float(risk_pct) / 100.0)
+
     try:
-        return acct.open_position_with_risk(symbol, side, entry_px, sl_px, tp_px, risk_pct=risk_pct)
+        ok, msg = acct.open_position_with_risk(symbol, side, entry_px, sl_px, tp_px, risk_pct=risk_pct)
     except TypeError:
         try:
-            return acct.open_position_with_risk(symbol, side, entry_px, sl_px, tp_px, risk_pct)
+            ok, msg = acct.open_position_with_risk(symbol, side, entry_px, sl_px, tp_px, risk_pct)
         except TypeError:
-            return acct.open_position_with_risk(symbol, side, entry_px, sl_px, tp_px)
+            ok, msg = acct.open_position_with_risk(symbol, side, entry_px, sl_px, tp_px)
+
+    if ok and hasattr(acct, "balance"):
+        post_balance = float(acct.balance)
+        deducted = pre_balance - post_balance
+        # Guard against a bug in VirtualAccount that deducts 10x the intended risk (e.g. $2,000 instead of $200)
+        if deducted > (intended_risk_dollars * 2.5) and intended_risk_dollars > 0:
+            acct.balance = round(pre_balance - intended_risk_dollars, 2)
+            msg = f"{msg} (Adjusted risk deduction to ${intended_risk_dollars:,.2f} for {risk_pct:.1f}%.)"
+
+    return ok, msg
 
 
 def _close_virtual_position_safe(
@@ -1058,6 +1207,7 @@ def _run_app() -> None:
         st.session_state["virtual_account"] = loaded_acct
         st.session_state["closed_positions_log"] = loaded_closed
 
+    st.session_state.setdefault("price_nonce", 0)
     acct: VirtualAccount = st.session_state["virtual_account"]
     broker: BrokerSession = st.session_state.setdefault("broker_session", BrokerSession())
     closed_log: list[dict] = st.session_state.setdefault("closed_positions_log", [])
@@ -1085,10 +1235,13 @@ def _run_app() -> None:
         risk_pct = st.slider("Risk per Trade (%)", min_value=0.5, max_value=5.0, value=2.0, step=0.5)
 
         st.divider()
-        auto_refresh = st.checkbox("Live Auto-Refresh Price", value=False)
-        refresh_sec = st.slider("Refresh Interval (sec)", min_value=10, max_value=60, value=15, step=5)
+        default_auto = tf_label == "1M"
+        auto_refresh = st.checkbox("Live Auto-Refresh Price", value=default_auto)
+        default_interval = 5 if tf_label == "1M" else 15
+        refresh_sec = st.slider("Refresh Interval (sec)", min_value=5, max_value=60, value=default_interval, step=5)
         if st.button("Refresh Price Now"):
-            fetch_tf_chart.clear()
+            _clear_chart_caches()
+            st.session_state["price_nonce"] = int(st.session_state.get("price_nonce", 0)) + 1
             st.rerun()
 
         st.divider()
@@ -1100,7 +1253,8 @@ def _run_app() -> None:
 
     st.title(f"DESTINY AI — {asset_name} ({symbol})")
 
-    full_df = fetch_tf_chart(symbol, tf_label, lookback_bars=250)
+    nonce = int(st.session_state.get("price_nonce", 0))
+    full_df = fetch_tf_chart(symbol, tf_label, lookback_bars=250, nonce=nonce)
     df_chart = full_df.tail(int(visible_bars)).copy() if not full_df.empty else full_df
 
     tf_mins = {"1D": 1440, "4H": 240, "1H": 60, "15M": 15, "5M": 5, "1M": 1}.get(tf_label, 15)
@@ -1145,6 +1299,7 @@ def _run_app() -> None:
         or []
     )
 
+    closed_items = list(getattr(acct, "closed_positions", None) or closed_log)
     chart_col, side_col = st.columns([2.2, 1.0])
 
     with chart_col:
@@ -1164,6 +1319,9 @@ def _run_app() -> None:
             show_ob_fvg_overlap=show_ob_fvg_overlap,
             show_bsl_ssl=show_bsl_ssl,
             invalidation_mode=invalidation_mode,
+            symbol=symbol,
+            open_positions=list(getattr(acct, "positions", []) or []),
+            closed_positions=closed_items,
         )
         st.plotly_chart(fig, use_container_width=True)
 
@@ -1220,7 +1378,6 @@ def _run_app() -> None:
         else:
             st.caption("No open positions.")
 
-        closed_items = list(getattr(acct, "closed_positions", None) or closed_log)
         st.markdown("#### Closed Positions")
         if closed_items:
             for idx_cl, item in enumerate(reversed(closed_items[-8:]), start=1):
@@ -1249,7 +1406,8 @@ def _run_app() -> None:
 
     if auto_refresh:
         time.sleep(int(refresh_sec))
-        fetch_tf_chart.clear()
+        _clear_chart_caches()
+        st.session_state["price_nonce"] = int(st.session_state.get("price_nonce", 0)) + 1
         st.rerun()
 
 
@@ -1263,4 +1421,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
