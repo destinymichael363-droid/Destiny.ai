@@ -101,3 +101,4 @@ def refresh_market_data():
 if __name__ == "__main__":
     logging.info("Destiny AI data refresh started")
     refresh_market_data()
+    logging.info("Destiny AI data refresh completed")
