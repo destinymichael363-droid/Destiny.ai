@@ -25,15 +25,9 @@ from broker_and_account import BrokerSession, VirtualAccount
 from ob_fvg_engine import run_ob_fvg_engine
 from sr_engine import run_sr_zones_engine
 
-try:
-    from strategy_engine import evaluate_setups as _evaluate_setups  # type: ignore
+from strategy_engine import evaluate_setups as _evaluate_setups  # type: ignore
 except Exception:
     _evaluate_setups = None
-
-try:
-    import mtf_runner as _mtf_runner  # type: ignore
-except Exception:
-    _mtf_runner = None
 
 try:
     import notifications as _notifications  # type: ignore
