@@ -1,6 +1,5 @@
 
 import os
-import time
 import logging
 from pathlib import Path
 
@@ -21,7 +20,6 @@ WATCHLIST = {
     "Bitcoin": "BTC-USD",
 }
 
-REFRESH_SECONDS = 900
 DATA_DIR = Path("data/market_data")
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -31,11 +29,15 @@ UPLOAD_TOKEN = os.getenv("DATA_UPLOAD_TOKEN")
 
 def refresh_market_data():
     if not UPLOAD_URL or not UPLOAD_TOKEN:
-        logging.error("Supabase upload configuration is missing")
-        return
+        raise RuntimeError("Supabase upload configuration is missing")
+
+    failures = []
+    successful_uploads = 0
 
     for name, symbol in WATCHLIST.items():
         try:
+            logging.info("Downloading %s", symbol)
+
             df = yf.download(
                 symbol,
                 period="14d",
@@ -45,8 +47,7 @@ def refresh_market_data():
             )
 
             if df.empty:
-                logging.warning("%s: no data returned", symbol)
-                continue
+                raise RuntimeError("No market data returned")
 
             if isinstance(df.columns, pd.MultiIndex):
                 df.columns = df.columns.get_level_values(0)
@@ -70,18 +71,33 @@ def refresh_market_data():
                 timeout=60,
             )
 
-            response.raise_for_status()
+            if not response.ok:
+                raise RuntimeError(
+                    f"Upload HTTP {response.status_code}: "
+                    f"{response.text[:500]}"
+                )
 
+            successful_uploads += 1
             logging.info(
                 "%s: %s rows uploaded successfully",
                 symbol,
                 len(df),
             )
 
-        except Exception:
-            logging.exception("Refresh failed for %s", symbol)
+        except Exception as error:
+            logging.exception("Failed: %s", symbol)
+            failures.append(f"{symbol}: {error}")
+
+    logging.info("Successful uploads: %s", successful_uploads)
+
+    if failures:
+        raise RuntimeError(
+            "Some uploads failed: " + "; ".join(failures)
+        )
+
+    logging.info("All five market-data uploads completed")
+
 
 if __name__ == "__main__":
     logging.info("Destiny AI data refresh started")
     refresh_market_data()
-    logging.info("Destiny AI data refresh completed")
