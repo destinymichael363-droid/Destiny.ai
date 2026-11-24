@@ -22,8 +22,10 @@ except Exception:
     _evaluate_setups = None
 
 STATE_PATH = Path("data/worker_state.json")
+VA_DIR = Path("data/virtual_accounts")
 POLL_INTERVAL_SEC = int(os.getenv("WORKER_POLL_SEC", "30"))
 MAX_SIGNALS = int(os.getenv("WORKER_MAX_SIGNALS", "25"))
+MAX_AUTO_OPEN_POSITIONS = int(os.getenv("MAX_AUTO_OPEN_POSITIONS", "3"))
 
 WORKER_WATCHLIST: list[tuple[str, str]] = [
     ("Gold (XAU)", "GC=F"),
@@ -109,6 +111,123 @@ def _supabase_save_worker_state(state: dict) -> bool:
         return False
 
 
+def _supabase_load_account(username: str) -> dict | None:
+    url, key = _supabase_config()
+    if not url or not key:
+        return None
+    endpoint = f"{url}/rest/v1/virtual_accounts?username=eq.{urllib.parse.quote(username)}&select=payload&limit=1"
+    req = urllib.request.Request(
+        endpoint,
+        headers={
+            "apikey": key,
+            "Authorization": f"Bearer {key}",
+            "Accept": "application/json",
+        },
+        method="GET",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            rows = json.loads(resp.read().decode("utf-8"))
+            if isinstance(rows, list) and rows:
+                raw_payload = rows[0].get("payload")
+                if isinstance(raw_payload, str):
+                    return json.loads(raw_payload)
+                if isinstance(raw_payload, dict):
+                    return raw_payload
+    except Exception:
+        return None
+    return None
+
+
+def _supabase_save_account(username: str, payload: dict) -> bool:
+    url, key = _supabase_config()
+    if not url or not key:
+        return False
+    endpoint = f"{url}/rest/v1/virtual_accounts?on_conflict=username"
+    body = json.dumps([{"username": username, "payload": payload}]).encode("utf-8")
+    req = urllib.request.Request(
+        endpoint,
+        data=body,
+        headers={
+            "apikey": key,
+            "Authorization": f"Bearer {key}",
+            "Content-Type": "application/json",
+            "Prefer": "resolution=merge-duplicates",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            return 200 <= resp.status < 300
+    except (urllib.error.URLError, Exception):
+        return False
+
+
+def _va_file_path(username: str) -> Path:
+    safe_name = "".join(ch if ch.isalnum() or ch in ("_", "-") else "_" for ch in username)[:40] or "default"
+    VA_DIR.mkdir(parents=True, exist_ok=True)
+    return VA_DIR / f"{safe_name}.json"
+
+
+def _try_auto_execute_virtual(signal_item: dict, risk_pct: float = 2.0) -> str:
+    enabled = os.getenv("AUTO_EXEC_VIRTUAL", "false").strip().lower() in ("1", "true", "yes", "on")
+    if not enabled:
+        return "signal_only"
+
+    username = os.getenv("AUTO_EXEC_USER", "").strip()
+    if not username:
+        return "signal_only_no_user"
+
+    try:
+        entry_px = float(signal_item.get("entry", 0) or 0)
+        sl_px = float(signal_item.get("sl", 0) or 0)
+        tp_px = float(signal_item.get("tp", 0) or 0)
+        side = str(signal_item.get("direction", "")).upper()
+        symbol = str(signal_item.get("symbol", "")).strip()
+        if entry_px <= 0 or sl_px <= 0 or tp_px <= 0 or side not in ("LONG", "SHORT") or not symbol:
+            return "signal_only_invalid_levels"
+
+        acct_path = _va_file_path(username)
+        payload = _supabase_load_account(username)
+        if not isinstance(payload, dict) and acct_path.exists():
+            payload = json.loads(acct_path.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            payload = {"balance": 10000.0, "positions": [], "closed_positions": []}
+
+        positions = list(payload.get("positions") or [])
+        if len(positions) >= MAX_AUTO_OPEN_POSITIONS:
+            return "max_positions_reached"
+
+        balance = round(float(payload.get("balance", 10000.0)), 2)
+        risk_dollars = round(balance * (float(risk_pct) / 100.0), 2)
+        sl_dist = abs(entry_px - sl_px)
+        if sl_dist <= 0 or risk_dollars <= 0 or balance < risk_dollars:
+            return "signal_only_risk_guard"
+
+        units = round(risk_dollars / sl_dist, 6)
+        margin_used = round(abs(units * entry_px) * 0.05, 2)
+
+        positions.append({
+            "symbol": symbol,
+            "side": side,
+            "entry_price": entry_px,
+            "stop_loss": sl_px,
+            "take_profit": tp_px,
+            "size": units,
+            "units": units,
+            "margin_used": margin_used,
+            "source": "auto_worker",
+        })
+        payload["balance"] = round(balance - risk_dollars, 2)
+        payload["positions"] = positions
+
+        acct_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        _supabase_save_account(username, payload)
+        return "virtual_executed"
+    except Exception:
+        return "auto_exec_error"
+
+
 def _clean_ohlcv(df: pd.DataFrame | None) -> pd.DataFrame:
     if df is None or df.empty:
         return pd.DataFrame(columns=OHLCV)
@@ -181,7 +300,7 @@ def _write_state_atomic(state: dict) -> None:
     _supabase_save_worker_state(state)
 
 
-def _scan_once(state: dict) -> dict:
+def _scan_once(state: dict, risk_pct: float = 2.0) -> dict:
     signals: list[dict] = list(state.get("signals") or [])
     seen_keys: list[str] = list(state.get("seen_keys") or [])
     seen_set = set(seen_keys)
@@ -233,7 +352,7 @@ def _scan_once(state: dict) -> dict:
             seen_set.add(dedupe_key)
             seen_keys.append(dedupe_key)
 
-            signals.append({
+            sig_item = {
                 "asset": asset_name,
                 "symbol": symbol,
                 "direction": direction,
@@ -245,7 +364,9 @@ def _scan_once(state: dict) -> dict:
                 "bar_time": bar_ts,
                 "logged_utc": _utc_now_str(),
                 "execution_status": "signal_only",
-            })
+            }
+            sig_item["execution_status"] = _try_auto_execute_virtual(sig_item, risk_pct=risk_pct)
+            signals.append(sig_item)
 
     state["scanned_assets"] = scanned
     state["signals"] = signals[-MAX_SIGNALS:]
@@ -253,11 +374,11 @@ def _scan_once(state: dict) -> dict:
     return state
 
 
-def run_worker_scan_once(status_label: str = "manual_scan_ok") -> dict:
+def run_worker_scan_once(status_label: str = "manual_scan_ok", risk_pct: float = 2.0) -> dict:
     state = _load_existing_state()
     try:
         state["cycle_count"] = int(state.get("cycle_count", 0)) + 1
-        state = _scan_once(state)
+        state = _scan_once(state, risk_pct=risk_pct)
         state["status"] = status_label
         state["updated_utc"] = _utc_now_str()
         _write_state_atomic(state)
