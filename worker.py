@@ -154,6 +154,34 @@ def _supabase_load_account(username: str) -> dict | None:
     return None
 
 
+def _supabase_list_usernames() -> list[str]:
+    url, key = _supabase_config()
+    if not url or not key:
+        return []
+    endpoint = f"{url}/rest/v1/virtual_accounts?select=username"
+    req = urllib.request.Request(
+        endpoint,
+        headers={
+            "apikey": key,
+            "Authorization": f"Bearer {key}",
+            "Accept": "application/json",
+        },
+        method="GET",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            rows = json.loads(resp.read().decode("utf-8"))
+            if isinstance(rows, list):
+                return [
+                    str(r.get("username", "")).strip()
+                    for r in rows
+                    if isinstance(r, dict) and str(r.get("username", "")).strip()
+                ]
+    except Exception:
+        return []
+    return []
+
+
 def _supabase_save_account(username: str, payload: dict) -> bool:
     url, key = _supabase_config()
     if not url or not key:
@@ -303,6 +331,7 @@ def _discover_trader_usernames() -> list[str]:
         for p in VA_DIR.glob("*.json"):
             if p.stem:
                 users.add(p.stem)
+    users.update(_supabase_list_usernames())
     return sorted(users)
 
 
