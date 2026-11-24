@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -9,272 +10,210 @@ from pathlib import Path
 import pandas as pd
 import yfinance as yf
 
-from broker_execution import ExecutionConfig, execute_order_guarded, load_execution_config, validate_and_size_order
-from mtf_runner import run_closed_candle_5tf_cascade
-from notifications import NotificationCenter
+from ob_fvg_engine import run_ob_fvg_engine
+from sr_engine import run_sr_zones_engine
 
+try:
+    from strategy_engine import evaluate_setups as _evaluate_setups  # type: ignore
+except Exception:
+    _evaluate_setups = None
 
-DATA_DIR = Path("data")
-SEEN_FILE = DATA_DIR / "seen_worker_alerts.json"
-STATE_FILE = DATA_DIR / "worker_state.json"
+STATE_PATH = Path("data/worker_state.json")
+POLL_INTERVAL_SEC = int(os.getenv("WORKER_POLL_SEC", "30"))
+MAX_SIGNALS = int(os.getenv("WORKER_MAX_SIGNALS", "25"))
 
-DEFAULT_WATCHLIST: dict[str, str] = {
-    "Bitcoin": "BTC-USD",
-    "Gold": "GC=F",
-    "Crude Oil": "CL=F",
-    "EUR/USD": "EURUSD=X",
-    "GBP/JPY": "GBPJPY=X",
-}
+WORKER_WATCHLIST: list[tuple[str, str]] = [
+    ("Gold (XAU)", "GC=F"),
+    ("Crude Oil (WTI)", "CL=F"),
+    ("EUR/USD", "EURUSD=X"),
+    ("GBP/USD", "GBPUSD=X"),
+    ("Bitcoin (BTC)", "BTC-USD"),
+]
 
 OHLCV = ["Open", "High", "Low", "Close", "Volume"]
+_RUNNING = True
 
 
-def _clean_df(frame: pd.DataFrame | None) -> pd.DataFrame:
-    if frame is None or frame.empty:
+def _handle_stop(signum: int, frame: object) -> None:
+    _ = (signum, frame)
+    global _RUNNING
+    _RUNNING = False
+
+
+def _utc_now_str() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+
+
+def _clean_ohlcv(df: pd.DataFrame | None) -> pd.DataFrame:
+    if df is None or df.empty:
         return pd.DataFrame(columns=OHLCV)
-
-    df = frame.copy()
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = df.columns.get_level_values(0)
-
-    required = ["Open", "High", "Low", "Close"]
-    if not all(col in df.columns for col in required):
+    out = df.copy()
+    if isinstance(out.columns, pd.MultiIndex):
+        out.columns = out.columns.get_level_values(0)
+    if not all(c in out.columns for c in ["Open", "High", "Low", "Close"]):
         return pd.DataFrame(columns=OHLCV)
-
-    if "Volume" not in df.columns:
-        df["Volume"] = 0.0
-
-    df = df[OHLCV].copy()
+    if "Volume" not in out.columns:
+        out["Volume"] = 0.0
+    out = out[OHLCV].copy()
     for col in OHLCV:
-        df[col] = pd.to_numeric(df[col], errors="coerce")
-
-    df = df.dropna(subset=required).sort_index()
-    df = df[~df.index.duplicated(keep="last")]
-
-    valid = (
-        (df["High"] >= df["Open"])
-        & (df["High"] >= df["Close"])
-        & (df["High"] >= df["Low"])
-        & (df["Low"] <= df["Open"])
-        & (df["Low"] <= df["Close"])
-        & (df["Low"] <= df["High"])
-    )
-    return df.loc[valid]
+        out[col] = pd.to_numeric(out[col], errors="coerce")
+    return out.dropna(subset=["Open", "High", "Low", "Close"]).sort_index().tail(200)
 
 
-def _fetch_yf(symbol: str, interval: str, period: str) -> pd.DataFrame:
+def _fetch_15m(symbol: str) -> pd.DataFrame:
     try:
-        raw = yf.Ticker(symbol).history(
-            period=period,
-            interval=interval,
+        dl = yf.download(
+            tickers=symbol,
+            period="14d",
+            interval="15m",
             auto_adjust=False,
             actions=False,
-            prepost=False,
+            progress=False,
+            threads=False,
         )
-        return _clean_df(raw)
-    except Exception:
-        return pd.DataFrame(columns=OHLCV)
-
-
-def _resample_4h(hourly: pd.DataFrame) -> pd.DataFrame:
-    if hourly is None or hourly.empty:
-        return pd.DataFrame(columns=OHLCV)
-    try:
-        resampled = hourly.resample("4h", label="right", closed="right").agg({
-            "Open": "first",
-            "High": "max",
-            "Low": "min",
-            "Close": "last",
-            "Volume": "sum",
-        })
-        return _clean_df(resampled)
-    except Exception:
-        return pd.DataFrame(columns=OHLCV)
-
-
-def load_5tf_frames(symbol: str) -> dict[str, pd.DataFrame]:
-    hourly = _fetch_yf(symbol, "1h", "730d")
-    return {
-        "4H": _resample_4h(hourly),
-        "1H": hourly,
-        "15M": _fetch_yf(symbol, "15m", "60d"),
-        "5M": _fetch_yf(symbol, "5m", "60d"),
-        "1M": _fetch_yf(symbol, "1m", "7d"),
-    }
-
-
-def load_seen_ids() -> set[str]:
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    if not SEEN_FILE.exists():
-        return set()
-    try:
-        data = json.loads(SEEN_FILE.read_text(encoding="utf-8"))
-        if isinstance(data, list):
-            return {str(x) for x in data[-2000:]}
+        cleaned = _clean_ohlcv(dl)
+        if not cleaned.empty:
+            return cleaned
     except Exception:
         pass
-    return set()
-
-
-def save_seen_ids(seen_ids: set[str]) -> None:
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    trimmed = list(seen_ids)[-2000:]
-    SEEN_FILE.write_text(json.dumps(trimmed, indent=2), encoding="utf-8")
-
-
-def load_existing_signals() -> list[dict]:
-    if not STATE_FILE.exists():
-        return []
     try:
-        payload = json.loads(STATE_FILE.read_text(encoding="utf-8"))
-        sigs = payload.get("signals", [])
-        return sigs if isinstance(sigs, list) else []
+        raw = yf.Ticker(symbol).history(period="14d", interval="15m", auto_adjust=False, actions=False)
+        return _clean_ohlcv(raw)
     except Exception:
-        return []
+        return pd.DataFrame(columns=OHLCV)
 
 
-def write_worker_state(signals: list[dict], new_alerts_count: int, status: str = "running") -> None:
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    payload = {
-        "status": status,
-        "updated_utc": datetime.now(timezone.utc).isoformat(),
-        "new_alerts_last_run": new_alerts_count,
-        "signals": signals[-30:],
+def _load_existing_state() -> dict:
+    if STATE_PATH.exists():
+        try:
+            data = json.loads(STATE_PATH.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                data.setdefault("signals", [])
+                data.setdefault("seen_keys", [])
+                return data
+        except Exception:
+            pass
+    return {
+        "status": "starting",
+        "updated_utc": _utc_now_str(),
+        "cycle_count": 0,
+        "signals": [],
+        "seen_keys": [],
     }
-    tmp_path = STATE_FILE.with_suffix(".tmp")
-    tmp_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-    tmp_path.replace(STATE_FILE)
 
 
-def run_once(
-    notifier: NotificationCenter,
-    seen_ids: set[str],
-    signals_history: list[dict],
-    exec_cfg: ExecutionConfig,
-    rr_target: float = 5.0,
-    tg_token: str = "",
-    tg_chat_id: str = "",
-) -> int:
-    new_alerts_count = 0
+def _write_state_atomic(state: dict) -> None:
+    STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = STATE_PATH.with_suffix(".json.tmp")
+    tmp_path.write_text(json.dumps(state, indent=2), encoding="utf-8")
+    os.replace(tmp_path, STATE_PATH)
 
-    for asset_name, symbol in DEFAULT_WATCHLIST.items():
-        frames = load_5tf_frames(symbol)
-        df_1m = frames.get("1M", pd.DataFrame())
-        if df_1m is None or len(df_1m) < 2:
+
+def _scan_once(state: dict) -> dict:
+    signals: list[dict] = list(state.get("signals") or [])
+    seen_keys: list[str] = list(state.get("seen_keys") or [])
+    seen_set = set(seen_keys)
+
+    if _evaluate_setups is None:
+        return state
+
+    for asset_name, symbol in WORKER_WATCHLIST:
+        df = _fetch_15m(symbol)
+        if df.empty:
             continue
 
-        closed_stamp = str(df_1m.index[-2])
-        mtf_out = run_closed_candle_5tf_cascade(frames, rr_target=rr_target)
-        sig = mtf_out.get("scalp_signal")
-
-        if sig is not None:
-            alert_key = f"worker_scalp_{symbol}_{sig.direction}_{sig.entry_price}_{closed_stamp}"
-            if alert_key not in seen_ids:
-                title = f"{asset_name} ({symbol}) {sig.direction} — {sig.confidence}"
-                detail = (
-                    f"Closed Bar: {closed_stamp} | "
-                    f"Entry: {sig.entry_price:,.5f} | "
-                    f"SL: {sig.stop_loss:,.5f} | "
-                    f"TP: {sig.take_profit:,.5f} (1:{sig.rr_ratio:.1f} R:R) | "
-                    f"HTF: {sig.htf_zone_summary} -> LTF: {sig.ltf_overlap_summary}"
-                )
-                pushed = notifier.push(
-                    event_id=alert_key,
-                    category="SCALP_SIGNAL",
-                    title=title,
-                    detail=detail,
-                    telegram_token=tg_token,
-                    telegram_chat_id=tg_chat_id,
-                )
-                if pushed:
-                    seen_ids.add(alert_key)
-                    new_alerts_count += 1
-
-                    # Guarded execution hook (dry-run unless AUTO_EXECUTE_LIVE=true)
-                    allowed, sizing_msg, units = validate_and_size_order(
-                        equity=10_000.0,
-                        realized_daily_pnl=0.0,
-                        open_positions_count=0,
-                        symbol=symbol,
-                        side=sig.direction,
-                        entry_price=sig.entry_price,
-                        stop_loss=sig.stop_loss,
-                        take_profit=sig.take_profit,
-                        requested_risk_pct=exec_cfg.max_risk_pct,
-                        cfg=exec_cfg,
-                    )
-                    exec_note = sizing_msg
-                    if allowed:
-                        _, exec_note = execute_order_guarded(
-                            symbol=symbol,
-                            side=sig.direction,
-                            entry_price=sig.entry_price,
-                            stop_loss=sig.stop_loss,
-                            take_profit=sig.take_profit,
-                            units=units,
-                            cfg=exec_cfg,
-                        )
-
-                    signals_history.append({
-                        "timestamp_utc": datetime.now(timezone.utc).isoformat(),
-                        "closed_bar": closed_stamp,
-                        "asset": asset_name,
-                        "symbol": symbol,
-                        "direction": sig.direction,
-                        "confidence": sig.confidence,
-                        "entry": round(float(sig.entry_price), 5),
-                        "sl": round(float(sig.stop_loss), 5),
-                        "tp": round(float(sig.take_profit), 5),
-                        "rr": float(sig.rr_ratio),
-                        "htf_zone": sig.htf_zone_summary,
-                        "ltf_zone": sig.ltf_overlap_summary,
-                        "execution_status": exec_note,
-                    })
-                    print(f"[{datetime.now(timezone.utc).isoformat()}] ALERT: {title} | {detail} | {exec_note}")
-
-    write_worker_state(signals_history, new_alerts_count=new_alerts_count, status="running")
-    return new_alerts_count
-
-
-def main() -> None:
-    poll_seconds = int(os.getenv("POLL_SECONDS", "60"))
-    rr_target = float(os.getenv("RR_TARGET", "5.0"))
-    tg_token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
-    tg_chat_id = os.getenv("TELEGRAM_CHAT_ID", "").strip()
-    run_once_mode = os.getenv("RUN_ONCE", "false").strip().lower() in ("1", "true", "yes")
-    exec_cfg = load_execution_config()
-
-    notifier = NotificationCenter()
-    seen_ids = load_seen_ids()
-    signals_history = load_existing_signals()
-
-    print(
-        f"DESTINY AI Worker started | poll={poll_seconds}s | rr=1:{rr_target:.1f} | "
-        f"live_exec={exec_cfg.auto_execute_live} | "
-        f"telegram={'enabled' if (tg_token and tg_chat_id) else 'console-only'}"
-    )
-
-    while True:
         try:
-            count = run_once(
-                notifier=notifier,
-                seen_ids=seen_ids,
-                signals_history=signals_history,
-                exec_cfg=exec_cfg,
-                rr_target=rr_target,
-                tg_token=tg_token,
-                tg_chat_id=tg_chat_id,
-            )
-            if count > 0:
-                save_seen_ids(seen_ids)
-        except Exception as exc:
-            write_worker_state(signals_history, new_alerts_count=0, status=f"error: {exc}")
-            print(f"[{datetime.now(timezone.utc).isoformat()}] Worker loop error: {exc}")
+            sr_out = run_sr_zones_engine(df, tf_label="15M", invalidation_mode="Wick")
+        except Exception:
+            sr_out = {"active_zones": [], "minor_zones": []}
 
-        if run_once_mode:
-            break
-        time.sleep(max(15, poll_seconds))
+        try:
+            ob_out = run_ob_fvg_engine(df, timeframe_minutes=15)
+        except Exception:
+            ob_out = {}
+
+        try:
+            setups = _evaluate_setups(
+                df=df,
+                symbol=symbol,
+                tf_label="15M",
+                sr_out=sr_out,
+                ob_out=ob_out,
+                rr_target=5.0,
+            ) or []
+        except Exception:
+            setups = []
+
+        bar_ts = str(df.index[-1])
+        for s in setups:
+            direction = str(s.get("direction") if isinstance(s, dict) else getattr(s, "direction", "SIGNAL"))
+            conf = str(s.get("confidence") if isinstance(s, dict) else getattr(s, "confidence", "15M"))
+            entry = s.get("entry") if isinstance(s, dict) else getattr(s, "entry", "n/a")
+            sl = s.get("sl") if isinstance(s, dict) else getattr(s, "sl", "n/a")
+            tp = s.get("tp") if isinstance(s, dict) else getattr(s, "tp", "n/a")
+            rr = s.get("rr") if isinstance(s, dict) else getattr(s, "rr", 5.0)
+
+            dedupe_key = f"{symbol}|15M|{direction}|{bar_ts}|{entry}"
+            if dedupe_key in seen_set:
+                continue
+            seen_set.add(dedupe_key)
+            seen_keys.append(dedupe_key)
+
+            signals.append({
+                "asset": asset_name,
+                "symbol": symbol,
+                "direction": direction,
+                "confidence": conf,
+                "entry": entry,
+                "sl": sl,
+                "tp": tp,
+                "rr": rr,
+                "bar_time": bar_ts,
+                "logged_utc": _utc_now_str(),
+                "execution_status": "signal_only",
+            })
+
+    state["signals"] = signals[-MAX_SIGNALS:]
+    state["seen_keys"] = seen_keys[-200:]
+    return state
+
+
+def run_worker_loop() -> None:
+    signal.signal(signal.SIGINT, _handle_stop)
+    signal.signal(signal.SIGTERM, _handle_stop)
+
+    state = _load_existing_state()
+    state["status"] = "running"
+    state["updated_utc"] = _utc_now_str()
+    _write_state_atomic(state)
+
+    while _RUNNING:
+        try:
+            state["cycle_count"] = int(state.get("cycle_count", 0)) + 1
+            state = _scan_once(state)
+            state["status"] = "running"
+            state["updated_utc"] = _utc_now_str()
+            _write_state_atomic(state)
+        except Exception as exc:
+            state["status"] = f"error: {exc}"
+            state["updated_utc"] = _utc_now_str()
+            try:
+                _write_state_atomic(state)
+            except Exception:
+                pass
+
+        for _ in range(max(1, POLL_INTERVAL_SEC)):
+            if not _RUNNING:
+                break
+            time.sleep(1)
+
+    state["status"] = "stopped"
+    state["updated_utc"] = _utc_now_str()
+    try:
+        _write_state_atomic(state)
+    except Exception:
+        pass
 
 
 if __name__ == "__main__":
-    main()
+    run_worker_loop()
