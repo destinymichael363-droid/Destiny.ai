@@ -7,6 +7,7 @@ import smtplib
 import ssl
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 from email.message import EmailMessage
@@ -37,6 +38,11 @@ try:
     import notifications as _notifications  # type: ignore
 except Exception:
     _notifications = None
+
+try:
+    from worker import run_worker_scan_once as _run_worker_scan_once  # type: ignore
+except Exception:
+    _run_worker_scan_once = None
 
 
 st.set_page_config(page_title="DESTINY AI — 5-TF Scalp & Account Studio", layout="wide")
@@ -147,6 +153,34 @@ def _supabase_save_account(username: str, payload: dict) -> bool:
             return 200 <= resp.status < 300
     except (urllib.error.URLError, Exception):
         return False
+
+
+def _supabase_load_worker_state() -> dict | None:
+    url, key = _supabase_config()
+    if not url or not key:
+        return None
+    endpoint = f"{url}/rest/v1/worker_state?id=eq.default&select=payload&limit=1"
+    req = urllib.request.Request(
+        endpoint,
+        headers={
+            "apikey": key,
+            "Authorization": f"Bearer {key}",
+            "Accept": "application/json",
+        },
+        method="GET",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            rows = json.loads(resp.read().decode("utf-8"))
+            if isinstance(rows, list) and rows:
+                raw_payload = rows[0].get("payload")
+                if isinstance(raw_payload, str):
+                    return json.loads(raw_payload)
+                if isinstance(raw_payload, dict):
+                    return raw_payload
+    except Exception:
+        return None
+    return None
 
 
 def _clean_ohlcv(df: pd.DataFrame | None) -> pd.DataFrame:
@@ -1331,20 +1365,43 @@ def render_strategy_setups(setups: list) -> None:
         )
 
 
+def _load_worker_state_for_ui() -> dict | None:
+    state_path = Path("data/worker_state.json")
+    if state_path.exists():
+        try:
+            data = json.loads(state_path.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                return data
+        except Exception:
+            pass
+    return _supabase_load_worker_state()
+
+
 def render_worker_panel() -> None:
     st.subheader("24/7 Cloud Worker Feed (`data/worker_state.json`)")
-    state_path = Path("data/worker_state.json")
-    if not state_path.exists():
-        st.info("Worker state file not found yet. Run `python worker.py` in a background worker service.")
+
+    if st.button("Run Worker Scan Now"):
+        if callable(_run_worker_scan_once):
+            with st.spinner("Running 15M scan across watchlist..."):
+                _run_worker_scan_once(status_label="manual_scan_ok")
+            st.rerun()
+        else:
+            st.warning("`run_worker_scan_once` not found in `worker.py`.")
+
+    state = _load_worker_state_for_ui()
+    if not isinstance(state, dict):
+        st.info("Worker state file not found yet. Tap **Run Worker Scan Now** or run `python worker.py` in a background worker service.")
         return
 
-    try:
-        state = json.loads(state_path.read_text(encoding="utf-8"))
-    except Exception as exc:
-        st.warning(f"Unable to parse worker state: {exc}")
-        return
+    st.caption(
+        f"Status: `{state.get('status', 'unknown')}` | "
+        f"Cycle: `{state.get('cycle_count', 0)}` | "
+        f"Last Update (UTC): `{state.get('updated_utc', 'n/a')}`"
+    )
+    scanned = state.get("scanned_assets") or []
+    if scanned:
+        st.caption(f"Scanned: `{', '.join(str(x) for x in scanned)}`")
 
-    st.caption(f"Status: `{state.get('status', 'unknown')}` | Last Update (UTC): `{state.get('updated_utc', 'n/a')}`")
     signals = state.get("signals", [])
     if not signals:
         st.write("No scalp setups logged in worker history yet.")
