@@ -413,6 +413,19 @@ def _load_or_init_virtual_account(username: str) -> tuple[VirtualAccount, list[d
     return VirtualAccount(), []
 
 
+def _sync_account_from_worker_if_updated(username: str, worker_state: dict | None) -> None:
+    """Reloads virtual account from storage when a new worker cycle completes."""
+    if not isinstance(worker_state, dict):
+        return
+    stamp = f"{worker_state.get('cycle_count', 0)}|{worker_state.get('updated_utc', '')}"
+    last_stamp = st.session_state.get("last_synced_worker_stamp", "")
+    if stamp and stamp != last_stamp:
+        st.session_state["last_synced_worker_stamp"] = stamp
+        loaded_acct, loaded_closed = _load_or_init_virtual_account(username)
+        st.session_state["virtual_account"] = loaded_acct
+        st.session_state["closed_positions_log"] = loaded_closed
+
+
 def _compute_controlled_unrealized_pnl(
     acct: VirtualAccount,
     symbol: str,
@@ -486,6 +499,7 @@ def _login_session_user(username: str) -> None:
     loaded_acct, loaded_closed = _load_or_init_virtual_account(username)
     st.session_state["virtual_account"] = loaded_acct
     st.session_state["closed_positions_log"] = loaded_closed
+    st.session_state.pop("last_synced_worker_stamp", None)
     st.session_state.setdefault("broker_session", BrokerSession())
     st.session_state.pop("pending_signup", None)
 
@@ -1397,13 +1411,13 @@ def _load_worker_state_for_ui() -> dict | None:
     return _supabase_load_worker_state()
 
 
-def render_worker_panel(user: str, risk_pct: float) -> None:
+def render_worker_panel(user: str, risk_pct: float, worker_state: dict | None = None) -> None:
     st.subheader("24/7 Cloud Worker Feed (`data/worker_state.json`)")
 
     auto_exec_virtual = st.checkbox(
         "Auto-Execute Virtual Trades on New Worker Signals",
         value=os.getenv("AUTO_EXEC_VIRTUAL", "false").strip().lower() in ("1", "true", "yes", "on"),
-        help="Automatically opens virtual positions using your risk % when new signals are logged.",
+        help="Automatically opens virtual positions using your risk % when new signals are logged and checks TP/SL hits.",
     )
     os.environ["AUTO_EXEC_VIRTUAL"] = "true" if auto_exec_virtual else "false"
     os.environ["AUTO_EXEC_USER"] = user
@@ -1411,16 +1425,17 @@ def render_worker_panel(user: str, risk_pct: float) -> None:
 
     if st.button("Scan Now (Force Cycle)"):
         if callable(_run_worker_scan_once):
-            with st.spinner("Running 15M scan across watchlist..."):
+            with st.spinner("Running 15M/1H/4H scan across watchlist..."):
                 _run_worker_scan_once(status_label="manual_scan_ok", risk_pct=float(risk_pct))
             loaded_acct, loaded_closed = _load_or_init_virtual_account(user)
             st.session_state["virtual_account"] = loaded_acct
             st.session_state["closed_positions_log"] = loaded_closed
+            st.session_state.pop("last_synced_worker_stamp", None)
             st.rerun()
         else:
             st.warning("`run_worker_scan_once` not found in `worker.py`.")
 
-    state = _load_worker_state_for_ui()
+    state = worker_state if isinstance(worker_state, dict) else _load_worker_state_for_ui()
     if not isinstance(state, dict):
         st.info("Background worker is initializing. Wait a moment or tap **Scan Now (Force Cycle)**.")
         return
@@ -1428,6 +1443,7 @@ def render_worker_panel(user: str, risk_pct: float) -> None:
     st.caption(
         f"Status: `{state.get('status', 'unknown')}` | "
         f"Cycle: `{state.get('cycle_count', 0)}` | "
+        f"TP/SL Auto-Closed: `{state.get('last_tp_sl_closed', 0)}` | "
         f"Last Update (UTC): `{state.get('updated_utc', 'n/a')}`"
     )
     scanned = state.get("scanned_assets") or []
@@ -1458,6 +1474,9 @@ def _run_app() -> None:
         loaded_acct, loaded_closed = _load_or_init_virtual_account(user)
         st.session_state["virtual_account"] = loaded_acct
         st.session_state["closed_positions_log"] = loaded_closed
+
+    latest_worker_state = _load_worker_state_for_ui()
+    _sync_account_from_worker_if_updated(user, latest_worker_state)
 
     st.session_state.setdefault("price_nonce", 0)
     acct: VirtualAccount = st.session_state["virtual_account"]
@@ -1494,6 +1513,7 @@ def _run_app() -> None:
         if st.button("Refresh Price Now"):
             _clear_chart_caches()
             st.session_state["price_nonce"] = int(st.session_state.get("price_nonce", 0)) + 1
+            st.session_state.pop("last_synced_worker_stamp", None)
             st.rerun()
 
         st.divider()
@@ -1659,7 +1679,7 @@ def _run_app() -> None:
     render_strategy_setups(setups)
 
     st.divider()
-    render_worker_panel(user=user, risk_pct=float(risk_pct))
+    render_worker_panel(user=user, risk_pct=float(risk_pct), worker_state=latest_worker_state)
 
     with st.expander("Broker Session Status"):
         if broker.connected:
