@@ -184,7 +184,28 @@ def _va_file_path(username: str) -> Path:
     return VA_DIR / f"{safe_name}.json"
 
 
-def _account_to_payload(acct: VirtualAccount, closed_log: list[dict]) -> dict:
+def _load_raw_account_payload(username: str) -> dict:
+    acct_path = _va_file_path(username)
+    remote = _supabase_load_account(username)
+    if isinstance(remote, dict):
+        return remote
+    if acct_path.exists():
+        try:
+            local = json.loads(acct_path.read_text(encoding="utf-8"))
+            if isinstance(local, dict):
+                return local
+        except Exception:
+            pass
+    return {
+        "balance": 10000.0,
+        "positions": [],
+        "closed_positions": [],
+        "auto_exec_virtual": True,
+        "risk_pct": 2.0,
+    }
+
+
+def _account_to_payload(acct: VirtualAccount, closed_log: list[dict], prefs: dict | None = None) -> dict:
     open_list = []
     for pos in list(getattr(acct, "positions", []) or []):
         sz_val = float(_get_val(pos, ("size", "qty", "quantity", "units"), 1.0))
@@ -201,18 +222,25 @@ def _account_to_payload(acct: VirtualAccount, closed_log: list[dict]) -> dict:
             "units": units_val,
             "margin_used": margin_v,
         })
+    p = prefs or {}
     return {
         "balance": round(float(getattr(acct, "balance", 10000.0)), 2),
         "positions": open_list,
         "closed_positions": list(closed_log or []),
+        "auto_exec_virtual": bool(p.get("auto_exec_virtual", True)),
+        "risk_pct": float(p.get("risk_pct", 2.0)),
     }
 
 
-def _payload_to_account(data: dict) -> tuple[VirtualAccount, list[dict]]:
+def _payload_to_account(data: dict) -> tuple[VirtualAccount, list[dict], dict]:
     acct = VirtualAccount()
     closed_log: list[dict] = []
+    prefs = {"auto_exec_virtual": True, "risk_pct": 2.0}
     if not isinstance(data, dict):
-        return acct, closed_log
+        return acct, closed_log, prefs
+
+    prefs["auto_exec_virtual"] = bool(data.get("auto_exec_virtual", True))
+    prefs["risk_pct"] = float(data.get("risk_pct", 2.0))
 
     if "balance" in data and hasattr(acct, "balance"):
         acct.balance = round(float(data["balance"]), 2)
@@ -243,31 +271,39 @@ def _payload_to_account(data: dict) -> tuple[VirtualAccount, list[dict]]:
                 )
             except Exception:
                 pass
-    return acct, closed_log
+    return acct, closed_log, prefs
 
 
-def _load_virtual_account_obj(username: str) -> tuple[VirtualAccount, list[dict]]:
-    acct_path = _va_file_path(username)
-    remote = _supabase_load_account(username)
-    if isinstance(remote, dict):
-        return _payload_to_account(remote)
-    if acct_path.exists():
-        try:
-            local = json.loads(acct_path.read_text(encoding="utf-8"))
-            if isinstance(local, dict):
-                return _payload_to_account(local)
-        except Exception:
-            pass
-    return VirtualAccount(), []
+def _load_virtual_account_obj(username: str) -> tuple[VirtualAccount, list[dict], dict]:
+    raw = _load_raw_account_payload(username)
+    return _payload_to_account(raw)
 
 
-def _save_virtual_account_obj(username: str, acct: VirtualAccount, closed_log: list[dict]) -> None:
-    payload = _account_to_payload(acct, closed_log)
+def _save_virtual_account_obj(username: str, acct: VirtualAccount, closed_log: list[dict], prefs: dict | None = None) -> None:
+    payload = _account_to_payload(acct, closed_log, prefs=prefs)
     try:
         _va_file_path(username).write_text(json.dumps(payload, indent=2), encoding="utf-8")
     except Exception:
         pass
     _supabase_save_account(username, payload)
+
+
+def _discover_trader_usernames() -> list[str]:
+    users: set[str] = set()
+    env_users = os.getenv("AUTO_EXEC_USERS", "").strip()
+    if env_users:
+        for u in env_users.split(","):
+            clean = u.strip()
+            if clean:
+                users.add(clean)
+    single_user = os.getenv("AUTO_EXEC_USER", "").strip()
+    if single_user:
+        users.add(single_user)
+    if VA_DIR.exists():
+        for p in VA_DIR.glob("*.json"):
+            if p.stem:
+                users.add(p.stem)
+    return sorted(users)
 
 
 def _open_via_virtual_account(
@@ -303,7 +339,6 @@ def _open_via_virtual_account(
             except TypeError:
                 continue
 
-    # Fallback if VirtualAccount has a different method signature
     sl_dist = abs(entry_px - sl_px)
     if sl_dist <= 0 or intended_risk_dollars <= 0 or pre_balance < intended_risk_dollars:
         return False, "signal_only_risk_guard"
@@ -326,104 +361,105 @@ def _open_via_virtual_account(
     return True, "opened_fallback"
 
 
-def _evaluate_tp_sl_hits(latest_prices: dict[str, tuple[float, float, float]]) -> int:
-    """Checks open positions against latest (high, low, close) and closes TP/SL hits."""
-    enabled = os.getenv("AUTO_EXEC_VIRTUAL", "false").strip().lower() in ("1", "true", "yes", "on")
-    username = os.getenv("AUTO_EXEC_USER", "").strip()
-    if not enabled or not username or not latest_prices:
+def _evaluate_tp_sl_hits_for_users(
+    latest_prices: dict[str, tuple[float, float, float]],
+    usernames: list[str],
+) -> int:
+    if not latest_prices or not usernames:
         return 0
 
-    acct, closed_log = _load_virtual_account_obj(username)
-    positions = list(getattr(acct, "positions", []) or [])
-    if not positions:
-        return 0
-
-    remaining = []
-    closed_count = 0
-    for pos in positions:
-        sym = str(_get_val(pos, ("symbol",), ""))
-        if sym not in latest_prices:
-            remaining.append(pos)
+    total_closed = 0
+    for username in usernames:
+        acct, closed_log, prefs = _load_virtual_account_obj(username)
+        positions = list(getattr(acct, "positions", []) or [])
+        if not positions:
             continue
 
-        bar_hi, bar_lo, bar_close = latest_prices[sym]
-        side = str(_get_val(pos, ("side",), "LONG")).upper()
-        entry_p = float(_get_val(pos, ("entry_price", "entry"), bar_close))
-        sl_p = float(_get_val(pos, ("stop_loss", "sl"), 0.0))
-        tp_p = float(_get_val(pos, ("take_profit", "tp"), 0.0))
-        units_val = float(_get_val(pos, ("units", "size", "qty", "quantity"), 0.0))
+        remaining = []
+        closed_count = 0
+        for pos in positions:
+            sym = str(_get_val(pos, ("symbol",), ""))
+            if sym not in latest_prices:
+                remaining.append(pos)
+                continue
 
-        exit_px: float | None = None
-        if side == "LONG":
-            if sl_p > 0 and bar_lo <= sl_p:
-                exit_px = sl_p
-            elif tp_p > 0 and bar_hi >= tp_p:
-                exit_px = tp_p
-        elif side == "SHORT":
-            if sl_p > 0 and bar_hi >= sl_p:
-                exit_px = sl_p
-            elif tp_p > 0 and bar_lo <= tp_p:
-                exit_px = tp_p
+            bar_hi, bar_lo, bar_close = latest_prices[sym]
+            side = str(_get_val(pos, ("side",), "LONG")).upper()
+            entry_p = float(_get_val(pos, ("entry_price", "entry"), bar_close))
+            sl_p = float(_get_val(pos, ("stop_loss", "sl"), 0.0))
+            tp_p = float(_get_val(pos, ("take_profit", "tp"), 0.0))
+            units_val = float(_get_val(pos, ("units", "size", "qty", "quantity"), 0.0))
 
-        if exit_px is None:
-            remaining.append(pos)
+            exit_px: float | None = None
+            if side == "LONG":
+                if sl_p > 0 and bar_lo <= sl_p:
+                    exit_px = sl_p
+                elif tp_p > 0 and bar_hi >= tp_p:
+                    exit_px = tp_p
+            elif side == "SHORT":
+                if sl_p > 0 and bar_hi >= sl_p:
+                    exit_px = sl_p
+                elif tp_p > 0 and bar_lo <= tp_p:
+                    exit_px = tp_p
+
+            if exit_px is None:
+                remaining.append(pos)
+                continue
+
+            signed_units = -abs(units_val) if side == "SHORT" else abs(units_val)
+            pnl_val = round(float((exit_px - entry_p) * signed_units), 2)
+            if hasattr(acct, "balance"):
+                acct.balance = round(float(acct.balance) + pnl_val, 2)
+
+            closed_log.append({
+                "symbol": sym,
+                "side": side,
+                "entry": entry_p,
+                "exit": float(exit_px),
+                "sl": sl_p,
+                "tp": tp_p,
+                "pnl": pnl_val,
+                "closed_by": "worker_tp_sl",
+            })
+            closed_count += 1
+
+        if closed_count > 0:
+            acct.positions = remaining
+            _save_virtual_account_obj(username, acct, closed_log, prefs=prefs)
+            total_closed += closed_count
+
+    return total_closed
+
+
+def _try_auto_execute_for_users(signal_item: dict, usernames: list[str], default_risk_pct: float = 2.0) -> str:
+    if not usernames:
+        return "auto_ready_no_trader"
+
+    entry_px = float(signal_item.get("entry", 0) or 0)
+    sl_px = float(signal_item.get("sl", 0) or 0)
+    tp_px = float(signal_item.get("tp", 0) or 0)
+    side = str(signal_item.get("direction", "")).upper()
+    symbol = str(signal_item.get("symbol", "")).strip()
+    if entry_px <= 0 or sl_px <= 0 or tp_px <= 0 or side not in ("LONG", "SHORT") or not symbol:
+        return "signal_only_invalid_levels"
+
+    executed_users: list[str] = []
+    for username in usernames:
+        acct, closed_log, prefs = _load_virtual_account_obj(username)
+        if not bool(prefs.get("auto_exec_virtual", True)):
             continue
-
-        signed_units = -abs(units_val) if side == "SHORT" else abs(units_val)
-        pnl_val = round(float((exit_px - entry_p) * signed_units), 2)
-        if hasattr(acct, "balance"):
-            acct.balance = round(float(acct.balance) + pnl_val, 2)
-
-        closed_log.append({
-            "symbol": sym,
-            "side": side,
-            "entry": entry_p,
-            "exit": float(exit_px),
-            "sl": sl_p,
-            "tp": tp_p,
-            "pnl": pnl_val,
-            "closed_by": "worker_tp_sl",
-        })
-        closed_count += 1
-
-    if closed_count > 0:
-        acct.positions = remaining
-        _save_virtual_account_obj(username, acct, closed_log)
-
-    return closed_count
-
-
-def _try_auto_execute_virtual(signal_item: dict, risk_pct: float = 2.0) -> str:
-    enabled = os.getenv("AUTO_EXEC_VIRTUAL", "false").strip().lower() in ("1", "true", "yes", "on")
-    if not enabled:
-        return "signal_only"
-
-    username = os.getenv("AUTO_EXEC_USER", "").strip()
-    if not username:
-        return "signal_only_no_user"
-
-    try:
-        entry_px = float(signal_item.get("entry", 0) or 0)
-        sl_px = float(signal_item.get("sl", 0) or 0)
-        tp_px = float(signal_item.get("tp", 0) or 0)
-        side = str(signal_item.get("direction", "")).upper()
-        symbol = str(signal_item.get("symbol", "")).strip()
-        if entry_px <= 0 or sl_px <= 0 or tp_px <= 0 or side not in ("LONG", "SHORT") or not symbol:
-            return "signal_only_invalid_levels"
-
-        acct, closed_log = _load_virtual_account_obj(username)
         positions = list(getattr(acct, "positions", []) or [])
         if len(positions) >= MAX_AUTO_OPEN_POSITIONS:
-            return "max_positions_reached"
+            continue
+        user_risk = float(prefs.get("risk_pct", default_risk_pct) or default_risk_pct)
+        ok, _msg = _open_via_virtual_account(acct, symbol, side, entry_px, sl_px, tp_px, risk_pct=user_risk)
+        if ok:
+            _save_virtual_account_obj(username, acct, closed_log, prefs=prefs)
+            executed_users.append(username)
 
-        ok, _msg = _open_via_virtual_account(acct, symbol, side, entry_px, sl_px, tp_px, risk_pct=risk_pct)
-        if not ok:
-            return "signal_only_risk_guard"
-
-        _save_virtual_account_obj(username, acct, closed_log)
-        return "virtual_executed"
-    except Exception:
-        return "auto_exec_error"
+    if executed_users:
+        return f"virtual_executed ({', '.join(executed_users)})"
+    return "auto_armed_no_new_fill"
 
 
 def _clean_ohlcv(df: pd.DataFrame | None) -> pd.DataFrame:
@@ -574,12 +610,14 @@ def _call_evaluate_setups_mtf(
     return []
 
 
-def _scan_once(state: dict, risk_pct: float = 2.0) -> dict:
+def _scan_once(state: dict, risk_pct: float = 2.0, target_users: list[str] | None = None) -> dict:
     signals: list[dict] = list(state.get("signals") or [])
     seen_keys: list[str] = list(state.get("seen_keys") or [])
     seen_set = set(seen_keys)
     scanned: list[str] = []
     latest_prices: dict[str, tuple[float, float, float]] = {}
+
+    users_to_process = target_users if target_users is not None else _discover_trader_usernames()
 
     for asset_name, symbol in WORKER_WATCHLIST:
         df_15m = _download_tf(symbol, interval="15m", period="14d", resample_4h=False)
@@ -671,12 +709,14 @@ def _scan_once(state: dict, risk_pct: float = 2.0) -> dict:
                 "rr": rr,
                 "bar_time": bar_ts,
                 "logged_utc": _utc_now_str(),
-                "execution_status": "signal_only",
+                "execution_status": "auto_armed",
             }
-            sig_item["execution_status"] = _try_auto_execute_virtual(sig_item, risk_pct=risk_pct)
+            sig_item["execution_status"] = _try_auto_execute_for_users(
+                sig_item, usernames=users_to_process, default_risk_pct=risk_pct
+            )
             signals.append(sig_item)
 
-    closed_hits = _evaluate_tp_sl_hits(latest_prices)
+    closed_hits = _evaluate_tp_sl_hits_for_users(latest_prices, usernames=users_to_process)
     state["last_tp_sl_closed"] = closed_hits
     state["scanned_assets"] = scanned
     state["signals"] = signals[-MAX_SIGNALS:]
@@ -684,11 +724,15 @@ def _scan_once(state: dict, risk_pct: float = 2.0) -> dict:
     return state
 
 
-def run_worker_scan_once(status_label: str = "manual_scan_ok", risk_pct: float = 2.0) -> dict:
+def run_worker_scan_once(
+    status_label: str = "auto_scan_ok",
+    risk_pct: float = 2.0,
+    target_users: list[str] | None = None,
+) -> dict:
     state = _load_existing_state()
     try:
         state["cycle_count"] = int(state.get("cycle_count", 0)) + 1
-        state = _scan_once(state, risk_pct=risk_pct)
+        state = _scan_once(state, risk_pct=risk_pct, target_users=target_users)
         state["status"] = status_label
         state["updated_utc"] = _utc_now_str()
         _write_state_atomic(state)
@@ -713,9 +757,8 @@ def run_worker_loop() -> None:
 
     while _RUNNING:
         try:
-            risk_val = float(os.getenv("AUTO_EXEC_RISK_PCT", "2.0") or "2.0")
             state["cycle_count"] = int(state.get("cycle_count", 0)) + 1
-            state = _scan_once(state, risk_pct=risk_val)
+            state = _scan_once(state)
             state["status"] = "running"
             state["updated_utc"] = _utc_now_str()
             _write_state_atomic(state)
