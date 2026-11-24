@@ -5,15 +5,8 @@ from typing import Literal
 
 import pandas as pd
 
-from ob_fvg_engine import (
-    PairedZone,
-    _atr,
-    run_ob_fvg_engine,
-)
-from sr_engine import (
-    SRZone,
-    run_sr_zones_engine,
-)
+from ob_fvg_engine import PairedZone, _atr, run_ob_fvg_engine
+from sr_engine import SRZone, run_sr_zones_engine
 
 
 @dataclass
@@ -30,27 +23,14 @@ class ScalpSignal:
     sweep_summary: str
 
 
-# ================================================================
-# BASIC HELPERS
-# ================================================================
-
-def _closed_only(
-    df: pd.DataFrame | None,
-) -> pd.DataFrame:
+def _closed_only(df: pd.DataFrame | None) -> pd.DataFrame:
     """
-    Remove the newest potentially-forming candle.
+    Return only fully closed candles.
 
-    The cascade therefore works only from completed candles.
-
-    This is especially important when the caller passes data from
-    a live market feed where the final row may still be moving.
+    The final row is assumed to be the currently forming candle and is
+    therefore excluded to prevent lookahead bias.
     """
-
-    if (
-        df is None
-        or not isinstance(df, pd.DataFrame)
-        or len(df) < 3
-    ):
+    if df is None or len(df) < 3:
         return pd.DataFrame()
 
     return df.iloc[:-1].copy()
@@ -62,199 +42,457 @@ def _zones_overlap(
     low_b: float,
     high_b: float,
 ) -> bool:
-    """
-    True only when two price intervals genuinely overlap.
-    """
+    """Return True when two price ranges overlap."""
+    return max(low_a, low_b) < min(high_a, high_b)
 
-    return max(
-        low_a,
-        low_b,
-    ) < min(
-        high_a,
-        high_b,
+
+def _price_in_or_near_zone(
+    price_low: float,
+    price_high: float,
+    zone_low: float,
+    zone_high: float,
+    tolerance: float = 0.0,
+) -> bool:
+    """
+    Determine whether the candle touches or is within a small tolerance
+    of a zone.
+    """
+    expanded_low = zone_low - tolerance
+    expanded_high = zone_high + tolerance
+
+    return (
+        price_low <= expanded_high
+        and price_high >= expanded_low
     )
 
 
 def _paired_zone_bounds(
     pz: PairedZone,
 ) -> tuple[float, float]:
-    """
-    Return the complete OB/FVG union.
-
-    This preserves the original behavior where the execution zone
-    covers both the OB and FVG rather than selecting only one.
-    """
-
+    """Return the complete OB+FVG price range."""
     return (
-        min(
-            pz.ob_low,
-            pz.fvg_low,
-        ),
-        max(
-            pz.ob_high,
-            pz.fvg_high,
-        ),
+        min(pz.ob_low, pz.fvg_low),
+        max(pz.ob_high, pz.fvg_high),
     )
 
 
-def _direction_label(
-    direction: int,
-) -> str:
+def _direction_name(direction: int) -> str:
     return {
         1: "BULLISH",
         -1: "BEARISH",
         0: "NEUTRAL",
-    }.get(
-        int(direction),
-        "NEUTRAL",
-    )
+    }.get(direction, "NEUTRAL")
 
 
-def _latest_signal_row(
-    result: dict,
-) -> dict:
-    """
-    Safely retrieve the latest structural signal.
-    """
-
-    sig_df = result.get(
-        "signals_df",
-        pd.DataFrame(),
-    )
-
-    if (
-        sig_df is None
-        or sig_df.empty
-    ):
-        return {}
-
-    row = sig_df.iloc[-1]
-
-    return row.to_dict()
-
-
-def _recent_column_any(
-    result: dict,
+def _safe_last_bool(
+    df: pd.DataFrame,
     column: str,
-    lookback: int,
+    lookback: int = 5,
 ) -> bool:
-    """
-    Safely determine whether a boolean/event column occurred recently.
-    """
-
-    sig_df = result.get(
-        "signals_df",
-        pd.DataFrame(),
-    )
-
-    if (
-        sig_df is None
-        or sig_df.empty
-        or column not in sig_df.columns
-    ):
+    """Safely check whether a boolean signal occurred recently."""
+    if df.empty or column not in df.columns:
         return False
 
-    values = (
-        sig_df[column]
-        .tail(max(int(lookback), 1))
-        .fillna(False)
-    )
+    values = df[column].tail(lookback)
 
-    return bool(
-        values.astype(bool).any()
-    )
+    if values.empty:
+        return False
+
+    return bool(values.fillna(False).astype(bool).any())
 
 
 def _recent_sweeps(
-    result: dict,
+    tf: str,
+    results: dict,
     lookback: int = 5,
 ) -> int:
     """
     Count recent liquidity sweeps.
 
-    Uses the corrected OB/FVG engine's sweep records.
+    This is intentionally treated as supporting evidence rather than
+    an independent trade trigger.
     """
-
-    sig_df = result.get(
+    sig_df = results[tf]["ob_fvg"].get(
         "signals_df",
         pd.DataFrame(),
     )
 
-    if (
-        sig_df is None
-        or sig_df.empty
-        or "swept_liquidity_count"
-        not in sig_df.columns
-    ):
+    if sig_df.empty:
+        return 0
+
+    if "swept_liquidity_count" not in sig_df.columns:
         return 0
 
     values = pd.to_numeric(
-        sig_df[
-            "swept_liquidity_count"
-        ].tail(
-            max(int(lookback), 1)
-        ),
+        sig_df["swept_liquidity_count"].tail(lookback),
         errors="coerce",
     ).fillna(0)
 
-    return int(
-        values.sum()
-    )
+    return int(values.sum())
 
 
-def _recent_directional_sweeps(
-    result: dict,
-    direction: int,
-    lookback: int,
+def _get_trend(
+    tf: str,
+    results: dict,
 ) -> int:
     """
-    Count sweeps relevant to the intended direction.
+    Read the latest closed-candle directional trend.
 
-    LONG:
-        SSL sweeps are the meaningful liquidity event.
-
-    SHORT:
-        BSL sweeps are the meaningful liquidity event.
+    Returns:
+        1  = bullish
+        -1 = bearish
+        0  = neutral/unknown
     """
-
-    sig_df = result.get(
+    sig_df = results[tf]["ob_fvg"].get(
         "signals_df",
         pd.DataFrame(),
     )
 
-    if (
-        sig_df is None
-        or sig_df.empty
-    ):
+    if sig_df.empty or "trend_direction" not in sig_df.columns:
         return 0
 
-    if direction == 1:
-        column = "swept_ssl_count"
+    value = sig_df["trend_direction"].iloc[-1]
 
-    elif direction == -1:
-        column = "swept_bsl_count"
-
-    else:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
         return 0
 
-    if column not in sig_df.columns:
-        return 0
 
-    values = pd.to_numeric(
-        sig_df[column].tail(
-            max(int(lookback), 1)
-        ),
-        errors="coerce",
-    ).fillna(0)
+def _get_structure_confirmation(
+    tf: str,
+    direction: int,
+    results: dict,
+    lookback: int = 5,
+) -> bool:
+    """
+    Check for recent directional BOS/setup confirmation.
 
-    return int(
-        values.sum()
+    The current OB/FVG engine exposes BOS/setup fields. These are used
+    as the structural confirmation layer without inventing a separate
+    CHoCH implementation.
+
+    If the engine later exposes explicit CHoCH fields, they can be
+    added here without changing the cascade architecture.
+    """
+    sig_df = results[tf]["ob_fvg"].get(
+        "signals_df",
+        pd.DataFrame(),
     )
 
+    if sig_df.empty:
+        return False
 
-# ================================================================
-# MAIN 5-TIMEFRAME CASCADE
-# ================================================================
+    if direction == 1:
+        return (
+            _safe_last_bool(
+                sig_df,
+                "bull_bos",
+                lookback,
+            )
+            or
+            _safe_last_bool(
+                sig_df,
+                "new_bull_setup",
+                lookback,
+            )
+        )
+
+    if direction == -1:
+        return (
+            _safe_last_bool(
+                sig_df,
+                "bear_bos",
+                lookback,
+            )
+            or
+            _safe_last_bool(
+                sig_df,
+                "new_bear_setup",
+                lookback,
+            )
+        )
+
+    return False
+
+
+def _build_htf_zones(
+    results: dict,
+) -> list[tuple[str, SRZone]]:
+    """Collect active 4H and 1H S/R zones."""
+    zones: list[tuple[str, SRZone]] = []
+
+    for tf in ("4H", "1H"):
+        for zone in results[tf]["sr"].get(
+            "active_zones",
+            [],
+        ):
+            zones.append((tf, zone))
+
+    return zones
+
+
+def _build_primary_15m_overlaps(
+    results: dict,
+    htf_direction: int,
+) -> list[dict]:
+    """
+    Build the primary setup layer.
+
+    A valid primary setup requires:
+
+        HTF zone
+            ↓
+        15M OB+FVG
+            ↓
+        15M directional alignment
+
+    5M/1M are deliberately excluded here because they are execution
+    refinement layers, not primary setup generators.
+    """
+    if htf_direction == 0:
+        return []
+
+    overlaps: list[dict] = []
+
+    htf_sr_zones = _build_htf_zones(results)
+
+    paired_1h_zones: list[PairedZone] = (
+        results["1H"]["ob_fvg"].get(
+            "active_zones",
+            [],
+        )
+    )
+
+    paired_15m_zones: list[PairedZone] = (
+        results["15M"]["ob_fvg"].get(
+            "active_zones",
+            [],
+        )
+    )
+
+    for pz_15m in paired_15m_zones:
+        if pz_15m.direction != htf_direction:
+            continue
+
+        pz_low, pz_high = _paired_zone_bounds(
+            pz_15m
+        )
+
+        # ---------------------------------------------------------
+        # 4H / 1H S/R -> 15M OB+FVG
+        # ---------------------------------------------------------
+        for htf_name, srz in htf_sr_zones:
+            expected_type = (
+                "support"
+                if htf_direction == 1
+                else "resistance"
+            )
+
+            if srz.zone_type != expected_type:
+                continue
+
+            if not _zones_overlap(
+                srz.bottom,
+                srz.top,
+                pz_low,
+                pz_high,
+            ):
+                continue
+
+            overlaps.append(
+                {
+                    "direction": htf_direction,
+                    "htf_source": (
+                        f"{htf_name} "
+                        f"{srz.zone_type.upper()} S/R "
+                        f"({srz.bottom:.5f}-"
+                        f"{srz.top:.5f})"
+                    ),
+                    "ltf_source": (
+                        f"15M "
+                        f"{'BULL' if htf_direction == 1 else 'BEAR'} "
+                        f"OB+FVG "
+                        f"({pz_low:.5f}-"
+                        f"{pz_high:.5f})"
+                    ),
+                    "primary_tf": "15M",
+                    "ltf_tf": "15M",
+                    "pz": pz_15m,
+                    "primary_low": pz_low,
+                    "primary_high": pz_high,
+                    "priority": (
+                        0 if htf_name == "4H" else 1
+                    ),
+                }
+            )
+
+        # ---------------------------------------------------------
+        # 1H OB+FVG -> 15M OB+FVG
+        # ---------------------------------------------------------
+        for pz_1h in paired_1h_zones:
+            if pz_1h.direction != htf_direction:
+                continue
+
+            h1_low, h1_high = _paired_zone_bounds(
+                pz_1h
+            )
+
+            if not _zones_overlap(
+                h1_low,
+                h1_high,
+                pz_low,
+                pz_high,
+            ):
+                continue
+
+            overlaps.append(
+                {
+                    "direction": htf_direction,
+                    "htf_source": (
+                        f"1H "
+                        f"{'BULL' if htf_direction == 1 else 'BEAR'} "
+                        f"OB+FVG "
+                        f"({h1_low:.5f}-"
+                        f"{h1_high:.5f})"
+                    ),
+                    "ltf_source": (
+                        f"15M "
+                        f"{'BULL' if htf_direction == 1 else 'BEAR'} "
+                        f"OB+FVG "
+                        f"({pz_low:.5f}-"
+                        f"{pz_high:.5f})"
+                    ),
+                    "primary_tf": "15M",
+                    "ltf_tf": "15M",
+                    "pz": pz_15m,
+                    "primary_low": pz_low,
+                    "primary_high": pz_high,
+                    "priority": 2,
+                }
+            )
+
+    return overlaps
+
+
+def _find_execution_confirmation(
+    results: dict,
+    primary_setup: dict,
+    direction: int,
+) -> dict:
+    """
+    Search for 5M/1M precision confirmation after the 15M setup
+    has already been validated.
+
+    Lower timeframes cannot create a setup by themselves.
+    """
+    primary_low = float(
+        primary_setup["primary_low"]
+    )
+    primary_high = float(
+        primary_setup["primary_high"]
+    )
+
+    confirmations: list[dict] = []
+
+    for tf in ("5M", "1M"):
+        df = results[tf]["df"]
+
+        if df.empty:
+            continue
+
+        sig_df = results[tf]["ob_fvg"].get(
+            "signals_df",
+            pd.DataFrame(),
+        )
+
+        if sig_df.empty:
+            continue
+
+        last_low = float(df["Low"].iloc[-1])
+        last_high = float(df["High"].iloc[-1])
+
+        # The precision timeframe must still interact with the
+        # primary 15M setup zone.
+        atr_series = _atr(df, 14)
+
+        if not atr_series.empty and not pd.isna(
+            atr_series.iloc[-1]
+        ):
+            tolerance = float(atr_series.iloc[-1]) * 0.25
+        else:
+            tolerance = abs(last_high - last_low) * 0.25
+
+        zone_interaction = _price_in_or_near_zone(
+            last_low,
+            last_high,
+            primary_low,
+            primary_high,
+            tolerance=tolerance,
+        )
+
+        if not zone_interaction:
+            continue
+
+        structure_ok = _get_structure_confirmation(
+            tf,
+            direction,
+            results,
+            lookback=5,
+        )
+
+        sweep_count = _recent_sweeps(
+            tf,
+            results,
+            lookback=8 if tf == "5M" else 10,
+        )
+
+        # A lower timeframe must either:
+        #
+        #   1. interact with the primary zone AND
+        #      show directional structure, or
+        #
+        #   2. interact with the zone AND have a
+        #      directional setup signal.
+        #
+        # It can never qualify solely because BOS occurred
+        # somewhere away from the primary zone.
+        if not structure_ok and sweep_count <= 0:
+            continue
+
+        confirmations.append(
+            {
+                "tf": tf,
+                "zone_interaction": zone_interaction,
+                "structure_confirmation": structure_ok,
+                "sweeps": sweep_count,
+                "priority": 0 if tf == "1M" else 1,
+            }
+        )
+
+    if not confirmations:
+        return {
+            "confirmed": False,
+            "tf": None,
+            "structure_confirmation": False,
+            "sweeps": 0,
+        }
+
+    confirmations.sort(
+        key=lambda item: item["priority"]
+    )
+
+    best = confirmations[0]
+
+    return {
+        "confirmed": True,
+        "tf": best["tf"],
+        "structure_confirmation": bool(
+            best["structure_confirmation"]
+        ),
+        "sweeps": int(best["sweeps"]),
+    }
+
 
 def run_closed_candle_5tf_cascade(
     frames_by_tf: dict[str, pd.DataFrame],
@@ -262,65 +500,41 @@ def run_closed_candle_5tf_cascade(
     atr_sl_buffer: float = 0.25,
 ) -> dict:
     """
-    DESTINY AI closed-candle multi-timeframe cascade.
+    Closed-candle multi-timeframe trading cascade.
 
-    Hierarchy:
+    Architecture:
 
         4H
-          ↓
-        primary location + bias
-
+         ↓
+        PRIMARY BIAS / LOCATION
+         ↓
         1H
-          ↓
-        HTF confirmation/context
-
+         ↓
+        CONFIRMATION / CONTEXT
+         ↓
         15M
-          ↓
-        PRIMARY SETUP CONFIRMATION
-        BOS / CHoCH
-        liquidity sweep
-        displacement
-        OB + FVG
-
+         ↓
+        PRIMARY SETUP
+         ↓
         5M
-          ↓
-        refinement
-
+         ↓
+        PRECISION CONFIRMATION
+         ↓
         1M
-          ↓
-        precision entry
+         ↓
+        EXECUTION
 
-    IMPORTANT:
+    Expected keys:
 
-    5M and 1M are NOT allowed to create a trade when the
-    15M setup is invalid.
+        4H
+        1H
+        15M
+        5M
+        1M
 
-    They can only refine a setup that has already passed the
-    higher-level conditions.
+    The function remains deterministic and rule-based.
+    No machine learning is introduced here.
     """
-
-    # ============================================================
-    # 1. SANITIZE PARAMETERS
-    # ============================================================
-
-    rr_target = max(
-        float(rr_target),
-        0.1,
-    )
-
-    atr_sl_buffer = max(
-        float(atr_sl_buffer),
-        0.0,
-    )
-
-    tf_order = [
-        "4H",
-        "1H",
-        "15M",
-        "5M",
-        "1M",
-    ]
-
     tf_minutes_map = {
         "4H": 240,
         "1H": 60,
@@ -329,23 +543,25 @@ def run_closed_candle_5tf_cascade(
         "1M": 1,
     }
 
-    results: dict[
-        str,
-        dict,
-    ] = {}
+    timeframe_order = [
+        "4H",
+        "1H",
+        "15M",
+        "5M",
+        "1M",
+    ]
 
-    # ============================================================
-    # 2. RUN EACH TIMEFRAME
-    # ============================================================
+    results: dict[str, dict] = {}
 
-    for tf in tf_order:
-
+    # =============================================================
+    # 1. Build each timeframe from closed candles only
+    # =============================================================
+    for tf in timeframe_order:
         closed_df = _closed_only(
             frames_by_tf.get(tf)
         )
 
         if closed_df.empty:
-
             results[tf] = {
                 "df": closed_df,
                 "sr": {
@@ -355,33 +571,18 @@ def run_closed_candle_5tf_cascade(
                 },
                 "ob_fvg": {
                     "active_zones": [],
-                    "active_liquidity": [],
-                    "signals_df": (
-                        pd.DataFrame()
-                    ),
+                    "signals_df": pd.DataFrame(),
                 },
             }
-
             continue
 
-        # --------------------------------------------------------
-        # S/R engine
-        # --------------------------------------------------------
-
         sr_res = run_sr_zones_engine(
-            closed_df,
-            tf_label=tf,
+            closed_df
         )
-
-        # --------------------------------------------------------
-        # OB/FVG engine
-        # --------------------------------------------------------
 
         ob_res = run_ob_fvg_engine(
             closed_df,
-            timeframe_minutes=(
-                tf_minutes_map[tf]
-            ),
+            timeframe_minutes=tf_minutes_map[tf],
         )
 
         results[tf] = {
@@ -390,585 +591,62 @@ def run_closed_candle_5tf_cascade(
             "ob_fvg": ob_res,
         }
 
-    # ============================================================
-    # 3. TREND HELPERS
-    # ============================================================
+    # =============================================================
+    # 2. Read directional trends
+    # =============================================================
+    tf_trends = {
+        tf: _get_trend(tf, results)
+        for tf in timeframe_order
+    }
 
-    def _get_trend(
-        tf: str,
-    ) -> int:
+    t_4h = tf_trends["4H"]
+    t_1h = tf_trends["1H"]
+    t_15m = tf_trends["15M"]
+    t_5m = tf_trends["5M"]
+    t_1m = tf_trends["1M"]
 
-        sig_df = results[tf][
-            "ob_fvg"
-        ].get(
-            "signals_df",
-            pd.DataFrame(),
-        )
-
-        if (
-            sig_df is None
-            or sig_df.empty
-            or "trend_direction"
-            not in sig_df.columns
-        ):
-            return 0
-
-        value = pd.to_numeric(
-            sig_df[
-                "trend_direction"
-            ].iloc[-1],
-            errors="coerce",
-        )
-
-        if pd.isna(value):
-            return 0
-
-        return int(value)
-
-    t_4h = _get_trend("4H")
-    t_1h = _get_trend("1H")
-    t_15m = _get_trend("15M")
-    t_5m = _get_trend("5M")
-    t_1m = _get_trend("1M")
-
-    # ============================================================
-    # 4. PRIMARY 4H BIAS
-    # ============================================================
+    # =============================================================
+    # 3. 4H MUST establish the primary bias
+    # =============================================================
     #
-    # IMPORTANT CHANGE:
+    # 4H is no longer allowed to be neutral while 1H creates
+    # a trade direction.
     #
-    # 4H is now the primary directional authority.
+    # 4H = primary authority.
     #
-    # We do NOT allow a bullish 1H trend to override a bearish
-    # 4H trend.
-    #
-    # This matches:
-    #
-    #       4H = location + primary bias
-    #       1H = confirmation
-    #
-    # ============================================================
+    htf_dir = 0
 
     if t_4h == 1:
-        htf_dir = (
-            1
-            if t_1h in (1, 0)
-            else 0
-        )
+        # 1H can be bullish or temporarily neutral.
+        # A bearish 1H blocks the setup.
+        if t_1h in (1, 0):
+            htf_dir = 1
 
     elif t_4h == -1:
-        htf_dir = (
-            -1
-            if t_1h in (-1, 0)
-            else 0
-        )
-
-    else:
-        # No reliable 4H direction means no directional setup.
-        htf_dir = 0
-
-    # ============================================================
-    # 5. HTF S/R
-    # ============================================================
-
-    htf_sr_zones: list[
-        tuple[str, SRZone]
-    ] = (
-        [
-            (
-                "4H",
-                z,
-            )
-            for z in results["4H"][
-                "sr"
-            ].get(
-                "active_zones",
-                [],
-            )
-        ]
-        +
-        [
-            (
-                "1H",
-                z,
-            )
-            for z in results["1H"][
-                "sr"
-            ].get(
-                "active_zones",
-                [],
-            )
-        ]
-    )
-
-    # ============================================================
-    # 6. HTF OB/FVG
-    # ============================================================
-
-    h1_paired_zones: list[
-        PairedZone
-    ] = results["1H"][
-        "ob_fvg"
-    ].get(
-        "active_zones",
-        [],
-    )
-
-    h4_paired_zones: list[
-        PairedZone
-    ] = results["4H"][
-        "ob_fvg"
-    ].get(
-        "active_zones",
-        [],
-    )
-
-    # ============================================================
-    # 7. FIND 15M PRIMARY SETUPS
-    # ============================================================
-    #
-    # This is the central correction.
-    #
-    # We no longer allow a 5M/1M zone to become the primary setup.
-    #
-    # A candidate must first exist on 15M.
-    #
-    # ============================================================
-
-    primary_15m_candidates: list[
-        dict
-    ] = []
-
-    df_15m = results["15M"][
-        "df"
-    ]
-
-    ob_15m = results["15M"][
-        "ob_fvg"
-    ]
-
-    sig_15m = ob_15m.get(
-        "signals_df",
-        pd.DataFrame(),
-    )
-
-    latest_15m = _latest_signal_row(
-        ob_15m
-    )
-
-    # Recent structural events.
-    bull_15m_bos = _recent_column_any(
-        ob_15m,
-        "bull_bos",
-        6,
-    )
-
-    bear_15m_bos = _recent_column_any(
-        ob_15m,
-        "bear_bos",
-        6,
-    )
-
-    bull_15m_choch = (
-        _recent_column_any(
-            ob_15m,
-            "choch_bull",
-            6,
-        )
-        or
-        _recent_column_any(
-            ob_15m,
-            "bull_choch",
-            6,
-        )
-    )
-
-    bear_15m_choch = (
-        _recent_column_any(
-            ob_15m,
-            "choch_bear",
-            6,
-        )
-        or
-        _recent_column_any(
-            ob_15m,
-            "bear_choch",
-            6,
-        )
-    )
-
-    bull_15m_structure = (
-        bull_15m_bos
-        or bull_15m_choch
-    )
-
-    bear_15m_structure = (
-        bear_15m_bos
-        or bear_15m_choch
-    )
-
-    # Directional liquidity sweep.
-    bull_15m_sweep = (
-        _recent_directional_sweeps(
-            ob_15m,
-            1,
-            8,
-        )
-        > 0
-    )
-
-    bear_15m_sweep = (
-        _recent_directional_sweeps(
-            ob_15m,
-            -1,
-            8,
-        )
-        > 0
-    )
-
-    # ------------------------------------------------------------
-    # 15M paired zones
-    # ------------------------------------------------------------
-
-    paired_15m_zones: list[
-        PairedZone
-    ] = ob_15m.get(
-        "active_zones",
-        [],
-    )
-
-    for pz in paired_15m_zones:
-
-        if htf_dir == 0:
-            continue
-
-        if pz.direction != htf_dir:
-            continue
-
-        pz_low, pz_high = (
-            _paired_zone_bounds(pz)
-        )
-
-        # --------------------------------------------------------
-        # Check whether the 15M zone is actually located inside
-        # an HTF S/R zone.
-        # --------------------------------------------------------
-
-        matching_htf_sr: list[
-            str
-        ] = []
-
-        expected_sr_type = (
-            "support"
-            if pz.direction == 1
-            else "resistance"
-        )
-
-        for htf_name, srz in htf_sr_zones:
-
-            if (
-                srz.zone_type
-                != expected_sr_type
-            ):
-                continue
-
-            if _zones_overlap(
-                srz.bottom,
-                srz.top,
-                pz_low,
-                pz_high,
-            ):
-                matching_htf_sr.append(
-                    (
-                        f"{htf_name} "
-                        f"{srz.zone_type.upper()} "
-                        f"S/R "
-                        f"({srz.bottom:.5f}-"
-                        f"{srz.top:.5f})"
-                    )
-                )
-
-        # --------------------------------------------------------
-        # Check 15M zone against 1H OB/FVG.
-        # --------------------------------------------------------
-
-        matching_h1_obfvg: list[
-            str
-        ] = []
-
-        for h1_pz in h1_paired_zones:
-
-            if (
-                h1_pz.direction
-                != pz.direction
-            ):
-                continue
-
-            h1_low, h1_high = (
-                _paired_zone_bounds(
-                    h1_pz
-                )
-            )
-
-            if _zones_overlap(
-                h1_low,
-                h1_high,
-                pz_low,
-                pz_high,
-            ):
-                matching_h1_obfvg.append(
-                    (
-                        "1H "
-                        + (
-                            "BULL"
-                            if pz.direction
-                            == 1
-                            else "BEAR"
-                        )
-                        + " OB+FVG "
-                        f"({h1_low:.5f}-"
-                        f"{h1_high:.5f})"
-                    )
-                )
-
-        # --------------------------------------------------------
-        # Check 15M zone against 4H OB/FVG as additional context.
-        # --------------------------------------------------------
-
-        matching_h4_obfvg: list[
-            str
-        ] = []
-
-        for h4_pz in h4_paired_zones:
-
-            if (
-                h4_pz.direction
-                != pz.direction
-            ):
-                continue
-
-            h4_low, h4_high = (
-                _paired_zone_bounds(
-                    h4_pz
-                )
-            )
-
-            if _zones_overlap(
-                h4_low,
-                h4_high,
-                pz_low,
-                pz_high,
-            ):
-                matching_h4_obfvg.append(
-                    (
-                        "4H "
-                        + (
-                            "BULL"
-                            if pz.direction
-                            == 1
-                            else "BEAR"
-                        )
-                        + " OB+FVG "
-                        f"({h4_low:.5f}-"
-                        f"{h4_high:.5f})"
-                    )
-                )
-
-        # --------------------------------------------------------
-        # The 15M zone must have meaningful HTF location.
-        # --------------------------------------------------------
-
-        htf_location_exists = bool(
-            matching_htf_sr
-            or matching_h1_obfvg
-            or matching_h4_obfvg
-        )
-
-        if not htf_location_exists:
-            continue
-
-        # --------------------------------------------------------
-        # 15M structure must agree with the direction.
-        # --------------------------------------------------------
-
-        if pz.direction == 1:
-
-            if not bull_15m_structure:
-                continue
-
-            sweep_ok = bull_15m_sweep
-
-        else:
-
-            if not bear_15m_structure:
-                continue
-
-            sweep_ok = bear_15m_sweep
-
-        # --------------------------------------------------------
-        # Your intended setup favors a liquidity sweep before
-        # confirmation.
-        #
-        # We require the relevant directional sweep here.
-        # --------------------------------------------------------
-
-        if not sweep_ok:
-            continue
-
-        primary_15m_candidates.append(
-            {
-                "direction": pz.direction,
-                "pz": pz,
-                "pz_low": pz_low,
-                "pz_high": pz_high,
-                "htf_sr": matching_htf_sr,
-                "h1_obfvg": matching_h1_obfvg,
-                "h4_obfvg": matching_h4_obfvg,
-                "structure_event": (
-                    "BULLISH BOS/CHoCH"
-                    if pz.direction == 1
-                    else "BEARISH BOS/CHoCH"
-                ),
-            }
-        )
-
-    # ============================================================
-    # 8. 15M PRIMARY SETUP STATUS
-    # ============================================================
-
-    primary_15m_valid = bool(
-        primary_15m_candidates
-    )
-
-    # ============================================================
-    # 9. 5M / 1M REFINEMENT
-    # ============================================================
-    #
-    # These timeframes can now only refine an already-valid 15M
-    # setup.
-    # ============================================================
-
-    refinement_candidates: list[
-        dict
-    ] = []
-
-    if primary_15m_valid:
-
-        for primary in (
-            primary_15m_candidates
-        ):
-
-            direction = (
-                primary["direction"]
-            )
-
-            primary_low = (
-                primary["pz_low"]
-            )
-
-            primary_high = (
-                primary["pz_high"]
-            )
-
-            for ltf_name in (
-                "5M",
-                "1M",
-            ):
-
-                ltf_result = results[
-                    ltf_name
-                ]
-
-                ltf_zones: list[
-                    PairedZone
-                ] = ltf_result[
-                    "ob_fvg"
-                ].get(
-                    "active_zones",
-                    [],
-                )
-
-                for pz in ltf_zones:
-
-                    if (
-                        pz.direction
-                        != direction
-                    ):
-                        continue
-
-                    ltf_low, ltf_high = (
-                        _paired_zone_bounds(
-                            pz
-                        )
-                    )
-
-                    # ------------------------------------------------
-                    # Lower timeframe zone must overlap the primary
-                    # 15M setup.
-                    # ------------------------------------------------
-
-                    if not _zones_overlap(
-                        primary_low,
-                        primary_high,
-                        ltf_low,
-                        ltf_high,
-                    ):
-                        continue
-
-                    refinement_candidates.append(
-                        {
-                            "direction": direction,
-                            "tf": ltf_name,
-                            "pz": pz,
-                            "low": ltf_low,
-                            "high": ltf_high,
-                            "primary": primary,
-                        }
-                    )
-
-    # ============================================================
-    # 10. SELECT BEST PRIMARY SETUP
-    # ============================================================
-
-    selected_primary = (
-        primary_15m_candidates[0]
-        if primary_15m_candidates
-        else None
-    )
-
-    # Prefer 1M → 5M refinement, but ONLY after 15M passes.
-    selected_refinement = None
-
-    if refinement_candidates:
-
-        selected_refinement = sorted(
-            refinement_candidates,
-            key=lambda x: {
-                "1M": 0,
-                "5M": 1,
-            }.get(
-                x["tf"],
-                2,
-            ),
-        )[0]
-
-    # ============================================================
-    # 11. RECENT SWEEPS FOR REPORTING
-    # ============================================================
-
+        # 1H can be bearish or temporarily neutral.
+        # A bullish 1H blocks the setup.
+        if t_1h in (-1, 0):
+            htf_dir = -1
+
+    # =============================================================
+    # 4. Recent liquidity sweeps
+    # =============================================================
     sweeps_15m = _recent_sweeps(
-        results["15M"]["ob_fvg"],
-        8,
+        "15M",
+        results,
+        lookback=6,
     )
 
     sweeps_5m = _recent_sweeps(
-        results["5M"]["ob_fvg"],
-        8,
+        "5M",
+        results,
+        lookback=8,
     )
 
     sweeps_1m = _recent_sweeps(
-        results["1M"]["ob_fvg"],
-        10,
+        "1M",
+        results,
+        lookback=10,
     )
 
     total_recent_sweeps = (
@@ -977,72 +655,119 @@ def run_closed_candle_5tf_cascade(
         + sweeps_1m
     )
 
-    # ============================================================
-    # 12. 1M EXECUTION
-    # ============================================================
+    # =============================================================
+    # 5. 15M is the PRIMARY setup layer
+    # =============================================================
+    primary_overlaps: list[dict] = []
 
-    scalp_signal: (
-        ScalpSignal | None
-    ) = None
+    if htf_dir != 0:
+        primary_overlaps = (
+            _build_primary_15m_overlaps(
+                results,
+                htf_dir,
+            )
+        )
 
-    df_1m = results["1M"][
-        "df"
-    ]
+    # =============================================================
+    # 6. 15M structural confirmation
+    # =============================================================
+    m15_structure_ok = False
 
-    sig_1m = results["1M"][
-        "ob_fvg"
-    ].get(
+    if htf_dir != 0:
+        m15_structure_ok = (
+            _get_structure_confirmation(
+                "15M",
+                htf_dir,
+                results,
+                lookback=5,
+            )
+        )
+
+    # =============================================================
+    # 7. Select best PRIMARY setup
+    # =============================================================
+    primary_setup: dict | None = None
+
+    if primary_overlaps:
+        primary_overlaps.sort(
+            key=lambda item: (
+                item["priority"],
+                -(
+                    item["primary_high"]
+                    - item["primary_low"]
+                ),
+            )
+        )
+
+        primary_setup = primary_overlaps[0]
+
+    # =============================================================
+    # 8. Require the complete HTF -> 15M chain
+    # =============================================================
+    setup_valid = bool(
+        htf_dir != 0
+        and primary_setup is not None
+        and m15_structure_ok
+    )
+
+    # =============================================================
+    # 9. 5M / 1M precision confirmation
+    # =============================================================
+    execution_confirmation = {
+        "confirmed": False,
+        "tf": None,
+        "structure_confirmation": False,
+        "sweeps": 0,
+    }
+
+    if setup_valid and primary_setup is not None:
+        execution_confirmation = (
+            _find_execution_confirmation(
+                results,
+                primary_setup,
+                htf_dir,
+            )
+        )
+
+    # =============================================================
+    # 10. Build compatibility overlaps output
+    # =============================================================
+    #
+    # Keep the original "overlaps" output so existing downstream
+    # code does not break.
+    #
+    # Primary 15M overlaps are returned first.
+    #
+    overlaps = list(primary_overlaps)
+
+    # =============================================================
+    # 11. Execute only after the complete chain is valid
+    # =============================================================
+    df_1m = results["1M"]["df"]
+
+    sig_1m = results["1M"]["ob_fvg"].get(
         "signals_df",
         pd.DataFrame(),
     )
 
-    # ------------------------------------------------------------
-    # No 15M setup = absolutely no trade.
-    # ------------------------------------------------------------
+    scalp_signal: ScalpSignal | None = None
 
     if (
-        selected_primary is not None
+        setup_valid
+        and primary_setup is not None
+        and execution_confirmation["confirmed"]
         and not df_1m.empty
     ):
-
-        direction = int(
-            selected_primary[
-                "direction"
-            ]
-        )
-
-        primary_pz: PairedZone = (
-            selected_primary["pz"]
-        )
-
-        primary_low = float(
-            selected_primary["pz_low"]
-        )
-
-        primary_high = float(
-            selected_primary["pz_high"]
-        )
-
-        # --------------------------------------------------------
-        # Current closed 1M candle.
-        # --------------------------------------------------------
-
         last_close_1m = float(
-            df_1m[
-                "Close"
-            ].iloc[-1]
+            df_1m["Close"].iloc[-1]
         )
 
         last_low_1m = float(
-            df_1m[
-                "Low"
-            ].iloc[-1]
+            df_1m["Low"].iloc[-1]
         )
 
         last_high_1m = float(
-            df_1m[
-                "High"
-            ].iloc[-1]
+            df_1m["High"].iloc[-1]
         )
 
         atr_1m_series = _atr(
@@ -1050,491 +775,242 @@ def run_closed_candle_5tf_cascade(
             14,
         )
 
-        atr_value = (
-            atr_1m_series.iloc[-1]
-            if not atr_1m_series.empty
-            else float("nan")
-        )
-
-        if pd.isna(atr_value):
+        if (
+            not atr_1m_series.empty
+            and not pd.isna(
+                atr_1m_series.iloc[-1]
+            )
+        ):
+            atr_1m = float(
+                atr_1m_series.iloc[-1]
+            )
+        else:
             atr_1m = abs(
                 last_high_1m
                 - last_low_1m
             )
 
+        # Prevent zero-distance risk.
+        atr_1m = max(
+            atr_1m,
+            abs(last_high_1m - last_low_1m),
+            1e-12,
+        )
+
+        # ---------------------------------------------------------
+        # Primary 15M zone controls invalidation.
+        # ---------------------------------------------------------
+        primary_low = float(
+            primary_setup["primary_low"]
+        )
+
+        primary_high = float(
+            primary_setup["primary_high"]
+        )
+
+        if htf_dir == 1:
+            sl = (
+                min(
+                    primary_low,
+                    last_low_1m,
+                )
+                - (
+                    atr_1m
+                    * atr_sl_buffer
+                )
+            )
+
+            risk_dist = (
+                last_close_1m
+                - sl
+            )
+
+            risk_dist = max(
+                risk_dist,
+                atr_1m * 0.5,
+            )
+
+            sl = (
+                last_close_1m
+                - risk_dist
+            )
+
+            tp = (
+                last_close_1m
+                + (
+                    risk_dist
+                    * rr_target
+                )
+            )
+
+            side: Literal[
+                "LONG",
+                "SHORT",
+            ] = "LONG"
+
         else:
-            atr_1m = float(
-                atr_value
+            sl = (
+                max(
+                    primary_high,
+                    last_high_1m,
+                )
+                + (
+                    atr_1m
+                    * atr_sl_buffer
+                )
             )
 
-        if (
-            not pd.isna(atr_1m)
-            and atr_1m > 0
-        ):
-
-            # ----------------------------------------------------
-            # Determine whether price is actually interacting with
-            # the primary 15M zone.
-            # ----------------------------------------------------
-
-            primary_zone_touched = (
-                last_low_1m
-                <= primary_high
-                and last_high_1m
-                >= primary_low
+            risk_dist = (
+                sl
+                - last_close_1m
             )
 
-            # ----------------------------------------------------
-            # Lower-timeframe refinement.
-            # ----------------------------------------------------
+            risk_dist = max(
+                risk_dist,
+                atr_1m * 0.5,
+            )
 
-            refinement_touched = False
+            sl = (
+                last_close_1m
+                + risk_dist
+            )
 
-            if selected_refinement is not None:
+            tp = (
+                last_close_1m
+                - (
+                    risk_dist
+                    * rr_target
+                )
+            )
 
-                refinement_low = float(
-                    selected_refinement[
-                        "low"
-                    ]
+            side = "SHORT"
+
+        # ---------------------------------------------------------
+        # Final risk validation
+        # ---------------------------------------------------------
+        valid_risk = (
+            risk_dist > 0
+            and tp > last_close_1m
+            if side == "LONG"
+            else (
+                risk_dist > 0
+                and tp < last_close_1m
+            )
+        )
+
+        calculated_rr = (
+            abs(tp - last_close_1m)
+            / risk_dist
+            if risk_dist > 0
+            else 0.0
+        )
+
+        valid_rr = (
+            calculated_rr >= rr_target * 0.99
+        )
+
+        if valid_risk and valid_rr:
+            m15_sweep = sweeps_15m > 0
+            lower_sweep = (
+                sweeps_5m > 0
+                or sweeps_1m > 0
+            )
+
+            ltf_confirmed = (
+                execution_confirmation[
+                    "structure_confirmation"
+                ]
+            )
+
+            if (
+                m15_sweep
+                and ltf_confirmed
+            ):
+                confidence = (
+                    "HIGH "
+                    "(15M Sweep + HTF/15M "
+                    "Overlap + LTF Confirmed)"
                 )
 
-                refinement_high = float(
-                    selected_refinement[
-                        "high"
-                    ]
+            elif m15_sweep:
+                confidence = (
+                    "HIGH "
+                    "(15M Sweep + HTF/15M "
+                    "Overlap)"
                 )
 
-                refinement_touched = (
-                    last_low_1m
-                    <= refinement_high
-                    and last_high_1m
-                    >= refinement_low
+            elif ltf_confirmed:
+                confidence = (
+                    "STANDARD "
+                    "(HTF/15M Overlap + "
+                    "LTF Confirmed)"
                 )
 
-            # ----------------------------------------------------
-            # 1M structural confirmation.
-            #
-            # It is OPTIONAL refinement.
-            #
-            # It cannot override the 15M setup.
-            # ----------------------------------------------------
-
-            if direction == 1:
-
-                m1_structure_ok = (
-                    _recent_column_any(
-                        results["1M"][
-                            "ob_fvg"
-                        ],
-                        "bull_bos",
-                        5,
-                    )
-                    or
-                    _recent_column_any(
-                        results["1M"][
-                            "ob_fvg"
-                        ],
-                        "choch_bull",
-                        5,
-                    )
-                    or
-                    _recent_column_any(
-                        results["1M"][
-                            "ob_fvg"
-                        ],
-                        "bull_choch",
-                        5,
-                    )
+            elif lower_sweep:
+                confidence = (
+                    "STANDARD "
+                    "(HTF/15M Overlap + "
+                    "LTF Sweep)"
                 )
 
             else:
-
-                m1_structure_ok = (
-                    _recent_column_any(
-                        results["1M"][
-                            "ob_fvg"
-                        ],
-                        "bear_bos",
-                        5,
-                    )
-                    or
-                    _recent_column_any(
-                        results["1M"][
-                            "ob_fvg"
-                        ],
-                        "choch_bear",
-                        5,
-                    )
-                    or
-                    _recent_column_any(
-                        results["1M"][
-                            "ob_fvg"
-                        ],
-                        "bear_choch",
-                        5,
-                    )
+                confidence = (
+                    "STANDARD "
+                    "(HTF/15M Overlap)"
                 )
 
-            # ----------------------------------------------------
-            # 5M structural confirmation.
-            # ----------------------------------------------------
-
-            if direction == 1:
-
-                m5_structure_ok = (
-                    _recent_column_any(
-                        results["5M"][
-                            "ob_fvg"
-                        ],
-                        "bull_bos",
-                        5,
-                    )
-                    or
-                    _recent_column_any(
-                        results["5M"][
-                            "ob_fvg"
-                        ],
-                        "choch_bull",
-                        5,
-                    )
-                    or
-                    _recent_column_any(
-                        results["5M"][
-                            "ob_fvg"
-                        ],
-                        "bull_choch",
-                        5,
-                    )
-                )
-
-            else:
-
-                m5_structure_ok = (
-                    _recent_column_any(
-                        results["5M"][
-                            "ob_fvg"
-                        ],
-                        "bear_bos",
-                        5,
-                    )
-                    or
-                    _recent_column_any(
-                        results["5M"][
-                            "ob_fvg"
-                        ],
-                        "choch_bear",
-                        5,
-                    )
-                    or
-                    _recent_column_any(
-                        results["5M"][
-                            "ob_fvg"
-                        ],
-                        "bear_choch",
-                        5,
-                    )
-                )
-
-            # ----------------------------------------------------
-            # Precision condition.
-            #
-            # We don't force a 1M BOS if the 15M setup is already
-            # valid and price has returned to the setup.
-            #
-            # But when lower-TF structure exists, confidence rises.
-            # ----------------------------------------------------
-
-            precision_ok = (
-                primary_zone_touched
-                or refinement_touched
-                or m1_structure_ok
-                or m5_structure_ok
+            execution_tf = (
+                execution_confirmation["tf"]
+                or "LTF"
             )
 
-            if precision_ok:
-
-                # ------------------------------------------------
-                # Entry remains the latest CLOSED 1M price.
-                # ------------------------------------------------
-
-                entry = (
-                    last_close_1m
-                )
-
-                # ------------------------------------------------
-                # Stop placement.
-                #
-                # For LONG:
-                #     below the deeper of primary zone / current
-                #     1M low.
-                #
-                # For SHORT:
-                #     above the deeper of primary zone / current
-                #     1M high.
-                # ------------------------------------------------
-
-                if direction == 1:
-
-                    sl = (
-                        min(
-                            primary_low,
-                            last_low_1m,
-                        )
-                        - (
-                            atr_1m
-                            * atr_sl_buffer
-                        )
-                    )
-
-                    risk_dist = max(
-                        entry - sl,
-                        atr_1m * 0.5,
-                    )
-
-                    sl = (
-                        entry
-                        - risk_dist
-                    )
-
-                    tp = (
-                        entry
-                        + risk_dist
-                        * rr_target
-                    )
-
-                    side: Literal[
-                        "LONG",
-                        "SHORT",
-                    ] = "LONG"
-
-                else:
-
-                    sl = (
-                        max(
-                            primary_high,
-                            last_high_1m,
-                        )
-                        + (
-                            atr_1m
-                            * atr_sl_buffer
-                        )
-                    )
-
-                    risk_dist = max(
-                        sl - entry,
-                        atr_1m * 0.5,
-                    )
-
-                    sl = (
-                        entry
-                        + risk_dist
-                    )
-
-                    tp = (
-                        entry
-                        - risk_dist
-                        * rr_target
-                    )
-
-                    side = "SHORT"
-
-                # ------------------------------------------------
-                # Confidence hierarchy.
-                # ------------------------------------------------
-
-                directional_sweep = (
-                    bull_15m_sweep
-                    if direction == 1
-                    else bear_15m_sweep
-                )
-
-                if (
-                    directional_sweep
-                    and (
-                        m5_structure_ok
-                        or m1_structure_ok
-                    )
-                    and selected_refinement
-                    is not None
-                ):
-                    confidence = (
-                        "VERY HIGH "
-                        "(4H+1H+15M "
-                        "Sweep+Structure+"
-                        "LTF Refinement)"
-                    )
-
-                elif (
-                    directional_sweep
-                    and selected_refinement
-                    is not None
-                ):
-                    confidence = (
-                        "HIGH "
-                        "(HTF Location+"
-                        "15M Sweep+"
-                        "LTF Refinement)"
-                    )
-
-                elif directional_sweep:
-                    confidence = (
-                        "HIGH "
-                        "(HTF Location+"
-                        "15M Sweep+"
-                        "Structure)"
-                    )
-
-                else:
-                    confidence = (
-                        "STANDARD "
-                        "(HTF+15M Structure)"
-                    )
-
-                # ------------------------------------------------
-                # HTF source summary.
-                # ------------------------------------------------
-
-                source_parts: list[
-                    str
-                ] = []
-
-                source_parts.extend(
-                    selected_primary[
-                        "htf_sr"
+            scalp_signal = ScalpSignal(
+                direction=side,
+                confidence=confidence,
+                entry_price=round(
+                    last_close_1m,
+                    5,
+                ),
+                stop_loss=round(
+                    sl,
+                    5,
+                ),
+                take_profit=round(
+                    tp,
+                    5,
+                ),
+                rr_ratio=round(
+                    calculated_rr,
+                    3,
+                ),
+                htf_bias=_direction_name(
+                    htf_dir
+                ),
+                htf_zone_summary=(
+                    primary_setup[
+                        "htf_source"
                     ]
-                )
-
-                source_parts.extend(
-                    selected_primary[
-                        "h1_obfvg"
+                ),
+                ltf_overlap_summary=(
+                    primary_setup[
+                        "ltf_source"
                     ]
-                )
+                    + f" | "
+                    f"15M structure confirmed"
+                    + f" | "
+                    f"{execution_tf} execution"
+                ),
+                sweep_summary=(
+                    f"15M:{sweeps_15m} | "
+                    f"5M:{sweeps_5m} | "
+                    f"1M:{sweeps_1m} "
+                    f"liquidity sweeps"
+                ),
+            )
 
-                source_parts.extend(
-                    selected_primary[
-                        "h4_obfvg"
-                    ]
-                )
-
-                if not source_parts:
-                    source_parts.append(
-                        "HTF location"
-                    )
-
-                htf_zone_summary = (
-                    " | ".join(
-                        dict.fromkeys(
-                            source_parts
-                        )
-                    )
-                )
-
-                # ------------------------------------------------
-                # LTF summary.
-                # ------------------------------------------------
-
-                if (
-                    selected_refinement
-                    is not None
-                ):
-
-                    ref = (
-                        selected_refinement
-                    )
-
-                    ref_pz: PairedZone = (
-                        ref["pz"]
-                    )
-
-                    ref_low = (
-                        ref["low"]
-                    )
-
-                    ref_high = (
-                        ref["high"]
-                    )
-
-                    ltf_overlap_summary = (
-                        f"15M primary "
-                        f"OB+FVG "
-                        f"({primary_low:.5f}-"
-                        f"{primary_high:.5f}) "
-                        f"| {ref['tf']} "
-                        f"{'BULL' if direction == 1 else 'BEAR'} "
-                        f"OB+FVG "
-                        f"({ref_low:.5f}-"
-                        f"{ref_high:.5f})"
-                    )
-
-                else:
-
-                    ltf_overlap_summary = (
-                        f"15M primary "
-                        f"{'BULL' if direction == 1 else 'BEAR'} "
-                        f"OB+FVG "
-                        f"({primary_low:.5f}-"
-                        f"{primary_high:.5f}) "
-                        "| No lower-TF paired-zone refinement"
-                    )
-
-                # ------------------------------------------------
-                # Sweep summary.
-                # ------------------------------------------------
-
-                directional_sweep_text = (
-                    "YES"
-                    if directional_sweep
-                    else "NO"
-                )
-
-                sweep_summary = (
-                    f"15M:{sweeps_15m} "
-                    f"| 5M:{sweeps_5m} "
-                    f"| 1M:{sweeps_1m} "
-                    f"| Directional 15M sweep:"
-                    f"{directional_sweep_text}"
-                )
-
-                scalp_signal = (
-                    ScalpSignal(
-                        direction=side,
-                        confidence=confidence,
-                        entry_price=round(
-                            entry,
-                            5,
-                        ),
-                        stop_loss=round(
-                            sl,
-                            5,
-                        ),
-                        take_profit=round(
-                            tp,
-                            5,
-                        ),
-                        rr_ratio=rr_target,
-                        htf_bias=_direction_label(
-                            htf_dir
-                        ),
-                        htf_zone_summary=(
-                            htf_zone_summary
-                        ),
-                        ltf_overlap_summary=(
-                            ltf_overlap_summary
-                        ),
-                        sweep_summary=(
-                            sweep_summary
-                        ),
-                    )
-                )
-
-    # ============================================================
-    # 13. RETURN EVERYTHING
-    # ============================================================
-    #
-    # Existing keys are preserved.
-    # Additional diagnostic fields are added.
-    # ============================================================
-
+    # =============================================================
+    # 12. Return complete cascade state
+    # =============================================================
     return {
         "tf_trends": {
             "4H": t_4h,
@@ -1546,36 +1022,34 @@ def run_closed_candle_5tf_cascade(
 
         "htf_bias": htf_dir,
 
-        # Original overlap field retained.
-        #
-        # We expose the new primary 15M candidates and refinement
-        # candidates separately below.
-        "overlaps": (
-            primary_15m_candidates
-            + refinement_candidates
+        "htf_bias_label": _direction_name(
+            htf_dir
         ),
 
-        "primary_15m_candidates": (
-            primary_15m_candidates
+        "primary_setup": {
+            "valid": setup_valid,
+            "direction": htf_dir,
+            "overlap": primary_setup,
+            "structure_confirmation": (
+                m15_structure_ok
+            ),
+            "sweeps_15m": sweeps_15m,
+        },
+
+        "execution_confirmation": (
+            execution_confirmation
         ),
 
-        "primary_15m_valid": (
-            primary_15m_valid
-        ),
-
-        "refinement_candidates": (
-            refinement_candidates
-        ),
+        "overlaps": overlaps,
 
         "recent_sweeps": {
             "15M": sweeps_15m,
             "5M": sweeps_5m,
             "1M": sweeps_1m,
+            "total": total_recent_sweeps,
         },
 
-        "scalp_signal": (
-            scalp_signal
-        ),
+        "scalp_signal": scalp_signal,
 
         "per_tf": results,
     }
