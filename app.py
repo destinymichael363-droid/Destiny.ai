@@ -5,6 +5,9 @@ import os
 import random
 import smtplib
 import ssl
+import time
+import urllib.error
+import urllib.request
 from datetime import datetime, timezone
 from email.message import EmailMessage
 from pathlib import Path
@@ -13,7 +16,6 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
-import streamlit.components.v1 as components
 import yfinance as yf
 
 from auth_and_store import authenticate_user, register_user
@@ -79,6 +81,72 @@ def _safe_secrets() -> dict:
         return dict(st.secrets)
     except Exception:
         return {}
+
+
+def _get_cfg(key: str, default: str = "") -> str:
+    env_val = os.getenv(key, "").strip()
+    if env_val:
+        return env_val
+    sec_val = _safe_secrets().get(key, default)
+    return str(sec_val).strip() if sec_val is not None else default
+
+
+def _supabase_config() -> tuple[str, str]:
+    url = _get_cfg("SUPABASE_URL", "").rstrip("/")
+    key = _get_cfg("SUPABASE_KEY", "") or _get_cfg("SUPABASE_ANON_KEY", "") or _get_cfg("SUPABASE_SERVICE_KEY", "")
+    return url, key
+
+
+def _supabase_load_account(username: str) -> dict | None:
+    url, key = _supabase_config()
+    if not url or not key:
+        return None
+    endpoint = f"{url}/rest/v1/virtual_accounts?username=eq.{urllib.parse.quote(username)}&select=payload&limit=1"
+    req = urllib.request.Request(
+        endpoint,
+        headers={
+            "apikey": key,
+            "Authorization": f"Bearer {key}",
+            "Accept": "application/json",
+        },
+        method="GET",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            rows = json.loads(resp.read().decode("utf-8"))
+            if isinstance(rows, list) and rows:
+                raw_payload = rows[0].get("payload")
+                if isinstance(raw_payload, str):
+                    return json.loads(raw_payload)
+                if isinstance(raw_payload, dict):
+                    return raw_payload
+    except Exception:
+        return None
+    return None
+
+
+def _supabase_save_account(username: str, payload: dict) -> bool:
+    url, key = _supabase_config()
+    if not url or not key:
+        return False
+    endpoint = f"{url}/rest/v1/virtual_accounts?on_conflict=username"
+    body = json.dumps([{"username": username, "payload": payload}]).encode("utf-8")
+    req = urllib.request.Request(
+        endpoint,
+        data=body,
+        headers={
+            "apikey": key,
+            "Authorization": f"Bearer {key}",
+            "Content-Type": "application/json",
+            "Prefer": "resolution=merge-duplicates",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            return 200 <= resp.status < 300
+    except (urllib.error.URLError, Exception):
+        return False
 
 
 def _clean_ohlcv(df: pd.DataFrame | None) -> pd.DataFrame:
@@ -187,30 +255,6 @@ def _clear_chart_caches() -> None:
         pass
 
 
-def _inject_auto_reload(interval_sec: int) -> None:
-    ms = max(5, int(interval_sec)) * 1000
-    components.html(
-        f"""
-        <script>
-        (function() {{
-            if (window.__destinyAutoReloadTimer) {{
-                clearTimeout(window.__destinyAutoReloadTimer);
-            }}
-            window.__destinyAutoReloadTimer = setTimeout(function() {{
-                try {{
-                    window.parent.location.reload();
-                }} catch (e) {{
-                    window.location.reload();
-                }}
-            }}, {ms});
-        }})();
-        </script>
-        """,
-        height=0,
-        width=0,
-    )
-
-
 def _get_val(obj: object, names: tuple[str, ...], default: object = None) -> object:
     for name in names:
         if isinstance(obj, dict) and name in obj:
@@ -226,74 +270,93 @@ def _va_file_path(username: str) -> Path:
     return VA_DIR / f"{safe_name}.json"
 
 
+def _account_to_payload(acct: VirtualAccount, closed_log: list[dict]) -> dict:
+    open_list = []
+    for pos in list(getattr(acct, "positions", []) or []):
+        sz_val = float(_get_val(pos, ("size", "qty", "quantity", "units"), 1.0))
+        units_val = float(_get_val(pos, ("units", "size", "qty", "quantity"), sz_val))
+        entry_v = float(_get_val(pos, ("entry_price", "entry"), 0.0))
+        margin_v = float(_get_val(pos, ("margin_used", "margin", "collateral"), max(0.0, abs(units_val * entry_v) * 0.05)))
+        open_list.append({
+            "symbol": str(_get_val(pos, ("symbol",), "")),
+            "side": str(_get_val(pos, ("side",), "LONG")),
+            "entry_price": entry_v,
+            "stop_loss": float(_get_val(pos, ("stop_loss", "sl"), 0.0)),
+            "take_profit": float(_get_val(pos, ("take_profit", "tp"), 0.0)),
+            "size": sz_val,
+            "units": units_val,
+            "margin_used": margin_v,
+        })
+    return {
+        "balance": round(float(getattr(acct, "balance", 10000.0)), 2),
+        "positions": open_list,
+        "closed_positions": list(closed_log or []),
+    }
+
+
+def _payload_to_account(data: dict) -> tuple[VirtualAccount, list[dict]]:
+    acct = VirtualAccount()
+    closed_log: list[dict] = []
+    if not isinstance(data, dict):
+        return acct, closed_log
+
+    if "balance" in data and hasattr(acct, "balance"):
+        acct.balance = round(float(data["balance"]), 2)
+    closed_log = list(data.get("closed_positions") or [])
+    saved_positions = list(data.get("positions") or [])
+    if saved_positions and hasattr(acct, "positions") and isinstance(acct.positions, list):
+        for item in saved_positions:
+            sym = str(item.get("symbol", ""))
+            side = str(item.get("side", "LONG"))
+            ent = float(item.get("entry_price", 0.0))
+            sl = float(item.get("stop_loss", 0.0))
+            tp = float(item.get("take_profit", 0.0))
+            sz = float(item.get("size", item.get("units", 1.0)))
+            raw_units = float(item.get("units", sz))
+            margin_used = float(item.get("margin_used", max(0.0, abs(raw_units * ent) * 0.05)))
+            try:
+                acct.positions.append(
+                    type("SavedPos", (), {
+                        "symbol": sym,
+                        "side": side,
+                        "entry_price": ent,
+                        "stop_loss": sl,
+                        "take_profit": tp,
+                        "size": sz,
+                        "units": raw_units,
+                        "margin_used": margin_used,
+                    })()
+                )
+            except Exception:
+                pass
+    return acct, closed_log
+
+
 def _save_virtual_account(username: str, acct: VirtualAccount, closed_log: list[dict]) -> None:
+    payload = _account_to_payload(acct, closed_log)
     try:
-        open_list = []
-        for pos in list(getattr(acct, "positions", []) or []):
-            sz_val = float(_get_val(pos, ("size", "qty", "quantity", "units"), 1.0))
-            units_val = float(_get_val(pos, ("units", "size", "qty", "quantity"), sz_val))
-            entry_v = float(_get_val(pos, ("entry_price", "entry"), 0.0))
-            margin_v = float(_get_val(pos, ("margin_used", "margin", "collateral"), max(0.0, abs(units_val * entry_v) * 0.05)))
-            open_list.append({
-                "symbol": str(_get_val(pos, ("symbol",), "")),
-                "side": str(_get_val(pos, ("side",), "LONG")),
-                "entry_price": entry_v,
-                "stop_loss": float(_get_val(pos, ("stop_loss", "sl"), 0.0)),
-                "take_profit": float(_get_val(pos, ("take_profit", "tp"), 0.0)),
-                "size": sz_val,
-                "units": units_val,
-                "margin_used": margin_v,
-            })
-        payload = {
-            "balance": float(getattr(acct, "balance", 10000.0)),
-            "positions": open_list,
-            "closed_positions": list(closed_log or []),
-        }
         _va_file_path(username).write_text(json.dumps(payload, indent=2), encoding="utf-8")
     except Exception:
         pass
+    _supabase_save_account(username, payload)
 
 
 def _load_or_init_virtual_account(username: str) -> tuple[VirtualAccount, list[dict]]:
-    acct = VirtualAccount()
-    closed_log: list[dict] = []
     path = _va_file_path(username)
+    local_data: dict | None = None
     if path.exists():
         try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-            if isinstance(data, dict):
-                if "balance" in data and hasattr(acct, "balance"):
-                    acct.balance = float(data["balance"])
-                closed_log = list(data.get("closed_positions") or [])
-                saved_positions = list(data.get("positions") or [])
-                if saved_positions and hasattr(acct, "positions") and isinstance(acct.positions, list):
-                    for item in saved_positions:
-                        sym = str(item.get("symbol", ""))
-                        side = str(item.get("side", "LONG"))
-                        ent = float(item.get("entry_price", 0.0))
-                        sl = float(item.get("stop_loss", 0.0))
-                        tp = float(item.get("take_profit", 0.0))
-                        sz = float(item.get("size", item.get("units", 1.0)))
-                        raw_units = float(item.get("units", sz))
-                        margin_used = float(item.get("margin_used", max(0.0, abs(raw_units * ent) * 0.05)))
-                        try:
-                            acct.positions.append(
-                                type("SavedPos", (), {
-                                    "symbol": sym,
-                                    "side": side,
-                                    "entry_price": ent,
-                                    "stop_loss": sl,
-                                    "take_profit": tp,
-                                    "size": sz,
-                                    "units": raw_units,
-                                    "margin_used": margin_used,
-                                })()
-                            )
-                        except Exception:
-                            pass
+            parsed = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(parsed, dict):
+                local_data = parsed
         except Exception:
-            pass
-    return acct, closed_log
+            local_data = None
+
+    remote_data = _supabase_load_account(username)
+    chosen = remote_data if isinstance(remote_data, dict) else local_data
+    if isinstance(chosen, dict):
+        return _payload_to_account(chosen)
+    return VirtualAccount(), []
 
 
 def _compute_controlled_unrealized_pnl(
@@ -313,7 +376,6 @@ def _compute_controlled_unrealized_pnl(
         p_entry = float(_get_val(pos, ("entry_price", "entry"), current_px))
         p_units = float(_get_val(pos, ("units", "size", "qty", "quantity"), 0.0))
 
-        # Normalize direction sign if units were stored unsigned
         signed_units = p_units
         if p_side == "SHORT" and signed_units > 0:
             signed_units = -signed_units
@@ -324,24 +386,15 @@ def _compute_controlled_unrealized_pnl(
         if max_pnl_cap is not None and max_pnl_cap > 0:
             pos_pnl = max(-max_pnl_cap, min(max_pnl_cap, pos_pnl))
         total_pnl += pos_pnl
-    return float(total_pnl)
+    return round(float(total_pnl), 2)
 
 
 def _send_confirmation_email(to_email: str, code: str) -> tuple[bool, str]:
-    secrets_data = _safe_secrets()
-
-    def _cfg(key: str, default: str = "") -> str:
-        env_val = os.getenv(key, "").strip()
-        if env_val:
-            return env_val
-        sec_val = secrets_data.get(key, default)
-        return str(sec_val).strip() if sec_val is not None else default
-
-    smtp_host = _cfg("SMTP_HOST", "smtp.gmail.com")
-    smtp_port = int(_cfg("SMTP_PORT", "465") or "465")
-    smtp_user = _cfg("SMTP_USER", "")
-    smtp_pass = _cfg("SMTP_PASS", "").replace(" ", "")
-    smtp_from = _cfg("SMTP_FROM", smtp_user)
+    smtp_host = _get_cfg("SMTP_HOST", "smtp.gmail.com")
+    smtp_port = int(_get_cfg("SMTP_PORT", "465") or "465")
+    smtp_user = _get_cfg("SMTP_USER", "")
+    smtp_pass = _get_cfg("SMTP_PASS", "").replace(" ", "")
+    smtp_from = _get_cfg("SMTP_FROM", smtp_user)
 
     if not smtp_host or not smtp_user or not smtp_pass:
         return False, f"SMTP not configured yet. Use confirmation code: **{code}**"
@@ -1103,8 +1156,8 @@ def _open_virtual_order_safe(
     tp_px: float,
     risk_pct: float,
 ) -> tuple[bool, str]:
-    pre_balance = float(getattr(acct, "balance", 10000.0))
-    intended_risk_dollars = pre_balance * (float(risk_pct) / 100.0)
+    pre_balance = round(float(getattr(acct, "balance", 10000.0)), 2)
+    intended_risk_dollars = round(pre_balance * (float(risk_pct) / 100.0), 2)
 
     try:
         ok, msg = acct.open_position_with_risk(symbol, side, entry_px, sl_px, tp_px, risk_pct=risk_pct)
@@ -1117,9 +1170,9 @@ def _open_virtual_order_safe(
     if ok and hasattr(acct, "balance"):
         post_balance = float(acct.balance)
         deducted = pre_balance - post_balance
-        if deducted > (intended_risk_dollars * 2.5) and intended_risk_dollars > 0:
+        if intended_risk_dollars > 0 and abs(deducted - intended_risk_dollars) > 0.05:
             acct.balance = round(pre_balance - intended_risk_dollars, 2)
-            msg = f"{msg} (Adjusted risk deduction to ${intended_risk_dollars:,.2f} for {risk_pct:.1f}%.)"
+            msg = f"{msg} (Controlled risk deduction: ${intended_risk_dollars:,.2f} for {risk_pct:.1f}%.)"
 
     return ok, msg
 
@@ -1159,6 +1212,9 @@ def _close_virtual_position_safe(
     pnl_val = (exit_px - entry_p) * signed_units
     if max_pnl_cap is not None and max_pnl_cap > 0:
         pnl_val = max(-max_pnl_cap, min(max_pnl_cap, pnl_val))
+    pnl_val = round(float(pnl_val), 2)
+
+    pre_balance = round(float(getattr(acct, "balance", 10000.0)), 2)
 
     handled_by_acct = False
     for method_name in ("close_position", "close_trade", "remove_position"):
@@ -1185,7 +1241,11 @@ def _close_virtual_position_safe(
     if not handled_by_acct:
         positions.pop(pos_index)
         if hasattr(acct, "balance"):
-            acct.balance = float(acct.balance) + pnl_val
+            acct.balance = round(pre_balance + pnl_val, 2)
+    elif hasattr(acct, "balance") and max_pnl_cap is not None and max_pnl_cap > 0:
+        expected_balance = round(pre_balance + pnl_val, 2)
+        if abs(float(acct.balance) - expected_balance) > 0.05:
+            acct.balance = expected_balance
 
     closed_log.append({
         "symbol": sym,
@@ -1302,7 +1362,7 @@ def _run_app() -> None:
     if not render_auth_gate():
         return
 
-    user = st.session_state["auth_user"]
+    user = str(st.session_state["auth_user"])
     if "virtual_account" not in st.session_state:
         loaded_acct, loaded_closed = _load_or_init_virtual_account(user)
         st.session_state["virtual_account"] = loaded_acct
@@ -1434,15 +1494,16 @@ def _run_app() -> None:
     with side_col:
         st.subheader("Virtual Account")
         current_px = float(df_chart["Close"].iloc[-1]) if not df_chart.empty else 0.0
-        risk_dollars = float(acct.balance) * (float(risk_pct) / 100.0)
-        reward_dollars = risk_dollars * float(rr_target)
+        acct_balance = round(float(getattr(acct, "balance", 10000.0)), 2)
+        risk_dollars = round(acct_balance * (float(risk_pct) / 100.0), 2)
+        reward_dollars = round(risk_dollars * float(rr_target), 2)
 
         cap_unrl = st.checkbox("Control / Cap Unrealized Swing", value=True)
         max_pnl_cap = reward_dollars if cap_unrl else None
         unrl = _compute_controlled_unrealized_pnl(acct, symbol, current_px, max_pnl_cap=max_pnl_cap)
 
         m1, m2 = st.columns(2)
-        m1.metric("Cash Balance", f"${acct.balance:,.2f}", delta=f"Unrealized: {unrl:+,.2f}")
+        m1.metric("Cash Balance", f"${acct_balance:,.2f}", delta=f"Unrealized: {unrl:+,.2f}")
         m2.metric("Risk / Trade ($)", f"${risk_dollars:,.2f}", delta=f"Target: +${reward_dollars:,.2f} ({risk_pct:.1f}%)")
 
         if current_px > 0:
@@ -1455,7 +1516,7 @@ def _run_app() -> None:
 
             est_risk_per_unit = abs(float(entry_in) - float(sl_in))
             st.caption(
-                f"Risking **${risk_dollars:,.2f}** ({risk_pct:.1f}% of ${acct.balance:,.2f}) | "
+                f"Risking **${risk_dollars:,.2f}** ({risk_pct:.1f}% of ${acct_balance:,.2f}) | "
                 f"SL Distance: `{est_risk_per_unit:.5f}` | Target R:R: `1:{rr_target:.1f}`"
             )
 
@@ -1516,7 +1577,10 @@ def _run_app() -> None:
             st.write("No active broker session connected (Virtual Mode active).")
 
     if auto_refresh:
-        _inject_auto_reload(int(refresh_sec))
+        time.sleep(int(refresh_sec))
+        _clear_chart_caches()
+        st.session_state["price_nonce"] = int(st.session_state.get("price_nonce", 0)) + 1
+        st.rerun()
 
 
 def main() -> None:
