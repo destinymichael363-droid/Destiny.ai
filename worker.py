@@ -4,6 +4,9 @@ import json
 import os
 import signal
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -42,6 +45,68 @@ def _handle_stop(signum: int, frame: object) -> None:
 
 def _utc_now_str() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+
+
+def _supabase_config() -> tuple[str, str]:
+    url = os.getenv("SUPABASE_URL", "").strip().rstrip("/")
+    key = (
+        os.getenv("SUPABASE_KEY", "").strip()
+        or os.getenv("SUPABASE_ANON_KEY", "").strip()
+        or os.getenv("SUPABASE_SERVICE_KEY", "").strip()
+    )
+    return url, key
+
+
+def _supabase_load_worker_state() -> dict | None:
+    url, key = _supabase_config()
+    if not url or not key:
+        return None
+    endpoint = f"{url}/rest/v1/worker_state?id=eq.default&select=payload&limit=1"
+    req = urllib.request.Request(
+        endpoint,
+        headers={
+            "apikey": key,
+            "Authorization": f"Bearer {key}",
+            "Accept": "application/json",
+        },
+        method="GET",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            rows = json.loads(resp.read().decode("utf-8"))
+            if isinstance(rows, list) and rows:
+                raw_payload = rows[0].get("payload")
+                if isinstance(raw_payload, str):
+                    return json.loads(raw_payload)
+                if isinstance(raw_payload, dict):
+                    return raw_payload
+    except Exception:
+        return None
+    return None
+
+
+def _supabase_save_worker_state(state: dict) -> bool:
+    url, key = _supabase_config()
+    if not url or not key:
+        return False
+    endpoint = f"{url}/rest/v1/worker_state?on_conflict=id"
+    body = json.dumps([{"id": "default", "payload": state}]).encode("utf-8")
+    req = urllib.request.Request(
+        endpoint,
+        data=body,
+        headers={
+            "apikey": key,
+            "Authorization": f"Bearer {key}",
+            "Content-Type": "application/json",
+            "Prefer": "resolution=merge-duplicates",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            return 200 <= resp.status < 300
+    except (urllib.error.URLError, Exception):
+        return False
 
 
 def _clean_ohlcv(df: pd.DataFrame | None) -> pd.DataFrame:
@@ -93,10 +158,16 @@ def _load_existing_state() -> dict:
                 return data
         except Exception:
             pass
+    remote = _supabase_load_worker_state()
+    if isinstance(remote, dict):
+        remote.setdefault("signals", [])
+        remote.setdefault("seen_keys", [])
+        return remote
     return {
         "status": "starting",
         "updated_utc": _utc_now_str(),
         "cycle_count": 0,
+        "scanned_assets": [],
         "signals": [],
         "seen_keys": [],
     }
@@ -107,19 +178,22 @@ def _write_state_atomic(state: dict) -> None:
     tmp_path = STATE_PATH.with_suffix(".json.tmp")
     tmp_path.write_text(json.dumps(state, indent=2), encoding="utf-8")
     os.replace(tmp_path, STATE_PATH)
+    _supabase_save_worker_state(state)
 
 
 def _scan_once(state: dict) -> dict:
     signals: list[dict] = list(state.get("signals") or [])
     seen_keys: list[str] = list(state.get("seen_keys") or [])
     seen_set = set(seen_keys)
-
-    if _evaluate_setups is None:
-        return state
+    scanned: list[str] = []
 
     for asset_name, symbol in WORKER_WATCHLIST:
         df = _fetch_15m(symbol)
         if df.empty:
+            continue
+        scanned.append(f"{symbol}@{str(df.index[-1])}")
+
+        if _evaluate_setups is None:
             continue
 
         try:
@@ -173,8 +247,27 @@ def _scan_once(state: dict) -> dict:
                 "execution_status": "signal_only",
             })
 
+    state["scanned_assets"] = scanned
     state["signals"] = signals[-MAX_SIGNALS:]
     state["seen_keys"] = seen_keys[-200:]
+    return state
+
+
+def run_worker_scan_once(status_label: str = "manual_scan_ok") -> dict:
+    state = _load_existing_state()
+    try:
+        state["cycle_count"] = int(state.get("cycle_count", 0)) + 1
+        state = _scan_once(state)
+        state["status"] = status_label
+        state["updated_utc"] = _utc_now_str()
+        _write_state_atomic(state)
+    except Exception as exc:
+        state["status"] = f"error: {exc}"
+        state["updated_utc"] = _utc_now_str()
+        try:
+            _write_state_atomic(state)
+        except Exception:
+            pass
     return state
 
 
