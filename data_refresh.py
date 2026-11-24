@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pandas as pd
 import yfinance as yf
+import requests
 
 logging.basicConfig(
     level=logging.INFO,
@@ -24,8 +25,15 @@ REFRESH_SECONDS = 900
 DATA_DIR = Path("data/market_data")
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
+UPLOAD_URL = os.getenv("SUPABASE_UPLOAD_URL")
+UPLOAD_TOKEN = os.getenv("DATA_UPLOAD_TOKEN")
+
 
 def refresh_market_data():
+    if not UPLOAD_URL or not UPLOAD_TOKEN:
+        logging.error("Supabase upload configuration is missing")
+        return
+
     for name, symbol in WATCHLIST.items():
         try:
             df = yf.download(
@@ -44,14 +52,30 @@ def refresh_market_data():
                 df.columns = df.columns.get_level_values(0)
 
             df = df.dropna()
-            filename = DATA_DIR / f"{name.lower().replace(' ', '_')}.csv"
-            df.to_csv(filename)
+
+            filename = f"{name.lower().replace(' ', '_')}.csv"
+            filepath = DATA_DIR / filename
+            df.to_csv(filepath)
+
+            response = requests.post(
+                UPLOAD_URL,
+                headers={
+                    "x-upload-token": UPLOAD_TOKEN,
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "filename": filename,
+                    "content": filepath.read_text(encoding="utf-8"),
+                },
+                timeout=60,
+            )
+
+            response.raise_for_status()
 
             logging.info(
-                "%s: saved %s rows to %s",
+                "%s: %s rows uploaded successfully",
                 symbol,
                 len(df),
-                filename,
             )
 
         except Exception:
