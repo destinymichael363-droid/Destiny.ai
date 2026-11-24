@@ -1,1 +1,30 @@
 
+name: Destiny AI Data Refresh
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Get repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install requirements
+        run: pip install -r requirements.txt
+
+      - name: Refresh market data
+        env:
+          SUPABASE_UPLOAD_URL: ${{ secrets.SUPABASE_UPLOAD_URL }}
+          DATA_UPLOAD_TOKEN: ${{ secrets.DATA_UPLOAD_TOKEN }}
+        run: python data_refresh.py
+
