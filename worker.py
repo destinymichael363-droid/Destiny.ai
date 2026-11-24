@@ -13,6 +13,7 @@ from pathlib import Path
 import pandas as pd
 import yfinance as yf
 
+from broker_and_account import VirtualAccount
 from ob_fvg_engine import run_ob_fvg_engine
 from sr_engine import run_sr_zones_engine
 
@@ -20,6 +21,11 @@ try:
     from strategy_engine import evaluate_setups as _evaluate_setups  # type: ignore
 except Exception:
     _evaluate_setups = None
+
+try:
+    import mtf_runner as _mtf_runner  # type: ignore
+except Exception:
+    _mtf_runner = None
 
 STATE_PATH = Path("data/worker_state.json")
 VA_DIR = Path("data/virtual_accounts")
@@ -47,6 +53,15 @@ def _handle_stop(signum: int, frame: object) -> None:
 
 def _utc_now_str() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+
+
+def _get_val(obj: object, names: tuple[str, ...], default: object = None) -> object:
+    for name in names:
+        if isinstance(obj, dict) and name in obj:
+            return obj[name]
+        if hasattr(obj, name):
+            return getattr(obj, name)
+    return default
 
 
 def _supabase_config() -> tuple[str, str]:
@@ -169,6 +184,215 @@ def _va_file_path(username: str) -> Path:
     return VA_DIR / f"{safe_name}.json"
 
 
+def _account_to_payload(acct: VirtualAccount, closed_log: list[dict]) -> dict:
+    open_list = []
+    for pos in list(getattr(acct, "positions", []) or []):
+        sz_val = float(_get_val(pos, ("size", "qty", "quantity", "units"), 1.0))
+        units_val = float(_get_val(pos, ("units", "size", "qty", "quantity"), sz_val))
+        entry_v = float(_get_val(pos, ("entry_price", "entry"), 0.0))
+        margin_v = float(_get_val(pos, ("margin_used", "margin", "collateral"), max(0.0, abs(units_val * entry_v) * 0.05)))
+        open_list.append({
+            "symbol": str(_get_val(pos, ("symbol",), "")),
+            "side": str(_get_val(pos, ("side",), "LONG")),
+            "entry_price": entry_v,
+            "stop_loss": float(_get_val(pos, ("stop_loss", "sl"), 0.0)),
+            "take_profit": float(_get_val(pos, ("take_profit", "tp"), 0.0)),
+            "size": sz_val,
+            "units": units_val,
+            "margin_used": margin_v,
+        })
+    return {
+        "balance": round(float(getattr(acct, "balance", 10000.0)), 2),
+        "positions": open_list,
+        "closed_positions": list(closed_log or []),
+    }
+
+
+def _payload_to_account(data: dict) -> tuple[VirtualAccount, list[dict]]:
+    acct = VirtualAccount()
+    closed_log: list[dict] = []
+    if not isinstance(data, dict):
+        return acct, closed_log
+
+    if "balance" in data and hasattr(acct, "balance"):
+        acct.balance = round(float(data["balance"]), 2)
+    closed_log = list(data.get("closed_positions") or [])
+    saved_positions = list(data.get("positions") or [])
+    if saved_positions and hasattr(acct, "positions") and isinstance(acct.positions, list):
+        for item in saved_positions:
+            sym = str(item.get("symbol", ""))
+            side = str(item.get("side", "LONG"))
+            ent = float(item.get("entry_price", 0.0))
+            sl = float(item.get("stop_loss", 0.0))
+            tp = float(item.get("take_profit", 0.0))
+            sz = float(item.get("size", item.get("units", 1.0)))
+            raw_units = float(item.get("units", sz))
+            margin_used = float(item.get("margin_used", max(0.0, abs(raw_units * ent) * 0.05)))
+            try:
+                acct.positions.append(
+                    type("SavedPos", (), {
+                        "symbol": sym,
+                        "side": side,
+                        "entry_price": ent,
+                        "stop_loss": sl,
+                        "take_profit": tp,
+                        "size": sz,
+                        "units": raw_units,
+                        "margin_used": margin_used,
+                    })()
+                )
+            except Exception:
+                pass
+    return acct, closed_log
+
+
+def _load_virtual_account_obj(username: str) -> tuple[VirtualAccount, list[dict]]:
+    acct_path = _va_file_path(username)
+    remote = _supabase_load_account(username)
+    if isinstance(remote, dict):
+        return _payload_to_account(remote)
+    if acct_path.exists():
+        try:
+            local = json.loads(acct_path.read_text(encoding="utf-8"))
+            if isinstance(local, dict):
+                return _payload_to_account(local)
+        except Exception:
+            pass
+    return VirtualAccount(), []
+
+
+def _save_virtual_account_obj(username: str, acct: VirtualAccount, closed_log: list[dict]) -> None:
+    payload = _account_to_payload(acct, closed_log)
+    try:
+        _va_file_path(username).write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+    _supabase_save_account(username, payload)
+
+
+def _open_via_virtual_account(
+    acct: VirtualAccount,
+    symbol: str,
+    side: str,
+    entry_px: float,
+    sl_px: float,
+    tp_px: float,
+    risk_pct: float,
+) -> tuple[bool, str]:
+    pre_balance = round(float(getattr(acct, "balance", 10000.0)), 2)
+    intended_risk_dollars = round(pre_balance * (float(risk_pct) / 100.0), 2)
+
+    open_fn = getattr(acct, "open_position_with_risk", None)
+    if callable(open_fn):
+        for call in (
+            lambda: open_fn(symbol, side, entry_px, sl_px, tp_px, risk_pct=risk_pct),
+            lambda: open_fn(symbol, side, entry_px, sl_px, tp_px, risk_pct),
+            lambda: open_fn(symbol, side, entry_px, sl_px, tp_px),
+        ):
+            try:
+                res = call()
+                if isinstance(res, tuple) and len(res) >= 2:
+                    ok, msg = bool(res[0]), str(res[1])
+                else:
+                    ok, msg = bool(res), "Opened via VirtualAccount"
+                if ok and hasattr(acct, "balance"):
+                    deducted = pre_balance - float(acct.balance)
+                    if intended_risk_dollars > 0 and abs(deducted - intended_risk_dollars) > 0.05:
+                        acct.balance = round(pre_balance - intended_risk_dollars, 2)
+                return ok, msg
+            except TypeError:
+                continue
+
+    # Fallback if VirtualAccount has a different method signature
+    sl_dist = abs(entry_px - sl_px)
+    if sl_dist <= 0 or intended_risk_dollars <= 0 or pre_balance < intended_risk_dollars:
+        return False, "signal_only_risk_guard"
+    units = round(intended_risk_dollars / sl_dist, 6)
+    positions = list(getattr(acct, "positions", []) or [])
+    positions.append(
+        type("WorkerPos", (), {
+            "symbol": symbol,
+            "side": side,
+            "entry_price": entry_px,
+            "stop_loss": sl_px,
+            "take_profit": tp_px,
+            "size": units,
+            "units": units,
+            "margin_used": round(abs(units * entry_px) * 0.05, 2),
+        })()
+    )
+    acct.positions = positions
+    acct.balance = round(pre_balance - intended_risk_dollars, 2)
+    return True, "opened_fallback"
+
+
+def _evaluate_tp_sl_hits(latest_prices: dict[str, tuple[float, float, float]]) -> int:
+    """Checks open positions against latest (high, low, close) and closes TP/SL hits."""
+    enabled = os.getenv("AUTO_EXEC_VIRTUAL", "false").strip().lower() in ("1", "true", "yes", "on")
+    username = os.getenv("AUTO_EXEC_USER", "").strip()
+    if not enabled or not username or not latest_prices:
+        return 0
+
+    acct, closed_log = _load_virtual_account_obj(username)
+    positions = list(getattr(acct, "positions", []) or [])
+    if not positions:
+        return 0
+
+    remaining = []
+    closed_count = 0
+    for pos in positions:
+        sym = str(_get_val(pos, ("symbol",), ""))
+        if sym not in latest_prices:
+            remaining.append(pos)
+            continue
+
+        bar_hi, bar_lo, bar_close = latest_prices[sym]
+        side = str(_get_val(pos, ("side",), "LONG")).upper()
+        entry_p = float(_get_val(pos, ("entry_price", "entry"), bar_close))
+        sl_p = float(_get_val(pos, ("stop_loss", "sl"), 0.0))
+        tp_p = float(_get_val(pos, ("take_profit", "tp"), 0.0))
+        units_val = float(_get_val(pos, ("units", "size", "qty", "quantity"), 0.0))
+
+        exit_px: float | None = None
+        if side == "LONG":
+            if sl_p > 0 and bar_lo <= sl_p:
+                exit_px = sl_p
+            elif tp_p > 0 and bar_hi >= tp_p:
+                exit_px = tp_p
+        elif side == "SHORT":
+            if sl_p > 0 and bar_hi >= sl_p:
+                exit_px = sl_p
+            elif tp_p > 0 and bar_lo <= tp_p:
+                exit_px = tp_p
+
+        if exit_px is None:
+            remaining.append(pos)
+            continue
+
+        signed_units = -abs(units_val) if side == "SHORT" else abs(units_val)
+        pnl_val = round(float((exit_px - entry_p) * signed_units), 2)
+        if hasattr(acct, "balance"):
+            acct.balance = round(float(acct.balance) + pnl_val, 2)
+
+        closed_log.append({
+            "symbol": sym,
+            "side": side,
+            "entry": entry_p,
+            "exit": float(exit_px),
+            "sl": sl_p,
+            "tp": tp_p,
+            "pnl": pnl_val,
+            "closed_by": "worker_tp_sl",
+        })
+        closed_count += 1
+
+    if closed_count > 0:
+        acct.positions = remaining
+        _save_virtual_account_obj(username, acct, closed_log)
+
+    return closed_count
+
+
 def _try_auto_execute_virtual(signal_item: dict, risk_pct: float = 2.0) -> str:
     enabled = os.getenv("AUTO_EXEC_VIRTUAL", "false").strip().lower() in ("1", "true", "yes", "on")
     if not enabled:
@@ -187,42 +411,16 @@ def _try_auto_execute_virtual(signal_item: dict, risk_pct: float = 2.0) -> str:
         if entry_px <= 0 or sl_px <= 0 or tp_px <= 0 or side not in ("LONG", "SHORT") or not symbol:
             return "signal_only_invalid_levels"
 
-        acct_path = _va_file_path(username)
-        payload = _supabase_load_account(username)
-        if not isinstance(payload, dict) and acct_path.exists():
-            payload = json.loads(acct_path.read_text(encoding="utf-8"))
-        if not isinstance(payload, dict):
-            payload = {"balance": 10000.0, "positions": [], "closed_positions": []}
-
-        positions = list(payload.get("positions") or [])
+        acct, closed_log = _load_virtual_account_obj(username)
+        positions = list(getattr(acct, "positions", []) or [])
         if len(positions) >= MAX_AUTO_OPEN_POSITIONS:
             return "max_positions_reached"
 
-        balance = round(float(payload.get("balance", 10000.0)), 2)
-        risk_dollars = round(balance * (float(risk_pct) / 100.0), 2)
-        sl_dist = abs(entry_px - sl_px)
-        if sl_dist <= 0 or risk_dollars <= 0 or balance < risk_dollars:
+        ok, _msg = _open_via_virtual_account(acct, symbol, side, entry_px, sl_px, tp_px, risk_pct=risk_pct)
+        if not ok:
             return "signal_only_risk_guard"
 
-        units = round(risk_dollars / sl_dist, 6)
-        margin_used = round(abs(units * entry_px) * 0.05, 2)
-
-        positions.append({
-            "symbol": symbol,
-            "side": side,
-            "entry_price": entry_px,
-            "stop_loss": sl_px,
-            "take_profit": tp_px,
-            "size": units,
-            "units": units,
-            "margin_used": margin_used,
-            "source": "auto_worker",
-        })
-        payload["balance"] = round(balance - risk_dollars, 2)
-        payload["positions"] = positions
-
-        acct_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-        _supabase_save_account(username, payload)
+        _save_virtual_account_obj(username, acct, closed_log)
         return "virtual_executed"
     except Exception:
         return "auto_exec_error"
@@ -244,27 +442,48 @@ def _clean_ohlcv(df: pd.DataFrame | None) -> pd.DataFrame:
     return out.dropna(subset=["Open", "High", "Low", "Close"]).sort_index().tail(200)
 
 
-def _fetch_15m(symbol: str) -> pd.DataFrame:
+def _resample_4h(hourly: pd.DataFrame) -> pd.DataFrame:
+    if hourly is None or hourly.empty:
+        return pd.DataFrame(columns=OHLCV)
+    try:
+        res = hourly.resample("4h", label="right", closed="right").agg({
+            "Open": "first",
+            "High": "max",
+            "Low": "min",
+            "Close": "last",
+            "Volume": "sum",
+        })
+        return _clean_ohlcv(res)
+    except Exception:
+        return pd.DataFrame(columns=OHLCV)
+
+
+def _download_tf(symbol: str, interval: str, period: str, resample_4h: bool = False) -> pd.DataFrame:
+    df = pd.DataFrame(columns=OHLCV)
     try:
         dl = yf.download(
             tickers=symbol,
-            period="14d",
-            interval="15m",
+            period=period,
+            interval=interval,
             auto_adjust=False,
             actions=False,
             progress=False,
             threads=False,
         )
-        cleaned = _clean_ohlcv(dl)
-        if not cleaned.empty:
-            return cleaned
+        df = _clean_ohlcv(dl)
     except Exception:
-        pass
-    try:
-        raw = yf.Ticker(symbol).history(period="14d", interval="15m", auto_adjust=False, actions=False)
-        return _clean_ohlcv(raw)
-    except Exception:
-        return pd.DataFrame(columns=OHLCV)
+        df = pd.DataFrame(columns=OHLCV)
+
+    if df.empty:
+        try:
+            raw = yf.Ticker(symbol).history(period=period, interval=interval, auto_adjust=False, actions=False)
+            df = _clean_ohlcv(raw)
+        except Exception:
+            df = pd.DataFrame(columns=OHLCV)
+
+    if resample_4h and not df.empty:
+        df = _resample_4h(df)
+    return df
 
 
 def _load_existing_state() -> dict:
@@ -300,51 +519,140 @@ def _write_state_atomic(state: dict) -> None:
     _supabase_save_worker_state(state)
 
 
+def _call_evaluate_setups_mtf(
+    df_15m: pd.DataFrame,
+    df_1h: pd.DataFrame,
+    df_4h: pd.DataFrame,
+    symbol: str,
+    sr_out: dict,
+    ob_out: dict,
+    mtf_context: dict,
+    rr_target: float = 5.0,
+) -> list:
+    if _evaluate_setups is None or df_15m.empty:
+        return []
+
+    attempts = [
+        lambda: _evaluate_setups(
+            df=df_15m,
+            symbol=symbol,
+            tf_label="15M",
+            sr_out=sr_out,
+            ob_out=ob_out,
+            rr_target=rr_target,
+            df_1h=df_1h,
+            df_4h=df_4h,
+            mtf_context=mtf_context,
+        ),
+        lambda: _evaluate_setups(
+            df=df_15m,
+            symbol=symbol,
+            tf_label="15M",
+            sr_out=sr_out,
+            ob_out=ob_out,
+            rr_target=rr_target,
+            mtf_data={"15M": df_15m, "1H": df_1h, "4H": df_4h, **mtf_context},
+        ),
+        lambda: _evaluate_setups(
+            df=df_15m,
+            symbol=symbol,
+            tf_label="15M",
+            sr_out=sr_out,
+            ob_out=ob_out,
+            rr_target=rr_target,
+        ),
+    ]
+    for fn in attempts:
+        try:
+            res = fn()
+            if res is not None:
+                return list(res)
+        except TypeError:
+            continue
+        except Exception:
+            return []
+    return []
+
+
 def _scan_once(state: dict, risk_pct: float = 2.0) -> dict:
     signals: list[dict] = list(state.get("signals") or [])
     seen_keys: list[str] = list(state.get("seen_keys") or [])
     seen_set = set(seen_keys)
     scanned: list[str] = []
+    latest_prices: dict[str, tuple[float, float, float]] = {}
 
     for asset_name, symbol in WORKER_WATCHLIST:
-        df = _fetch_15m(symbol)
-        if df.empty:
+        df_15m = _download_tf(symbol, interval="15m", period="14d", resample_4h=False)
+        if df_15m.empty:
             continue
-        scanned.append(f"{symbol}@{str(df.index[-1])}")
+
+        latest_prices[symbol] = (
+            float(df_15m["High"].iloc[-1]),
+            float(df_15m["Low"].iloc[-1]),
+            float(df_15m["Close"].iloc[-1]),
+        )
+        scanned.append(f"{symbol}@{str(df_15m.index[-1])}")
 
         if _evaluate_setups is None:
             continue
 
+        df_1h = _download_tf(symbol, interval="1h", period="60d", resample_4h=False)
+        df_4h = _download_tf(symbol, interval="1h", period="120d", resample_4h=True)
+
         try:
-            sr_out = run_sr_zones_engine(df, tf_label="15M", invalidation_mode="Wick")
+            sr_out = run_sr_zones_engine(df_15m, tf_label="15M", invalidation_mode="Wick")
         except Exception:
             sr_out = {"active_zones": [], "minor_zones": []}
 
         try:
-            ob_out = run_ob_fvg_engine(df, timeframe_minutes=15)
+            ob_out = run_ob_fvg_engine(df_15m, timeframe_minutes=15)
         except Exception:
             ob_out = {}
 
-        try:
-            setups = _evaluate_setups(
-                df=df,
-                symbol=symbol,
-                tf_label="15M",
-                sr_out=sr_out,
-                ob_out=ob_out,
-                rr_target=5.0,
-            ) or []
-        except Exception:
-            setups = []
+        mtf_context: dict = {"15M": df_15m, "1H": df_1h, "4H": df_4h}
+        if _mtf_runner is not None:
+            for hook_name in ("build_mtf_context", "get_mtf_context", "enrich_chart_context"):
+                fn = getattr(_mtf_runner, hook_name, None)
+                if callable(fn):
+                    try:
+                        out = fn(
+                            symbol=symbol,
+                            tf_label="15M",
+                            df=df_15m,
+                            df_1h=df_1h,
+                            df_4h=df_4h,
+                            sr_out=sr_out,
+                            ob_out=ob_out,
+                        )
+                        if isinstance(out, dict):
+                            sr_out = out.get("sr_out", sr_out)
+                            ob_out = out.get("ob_out", ob_out)
+                            mtf_context.update(out)
+                        break
+                    except TypeError:
+                        continue
+                    except Exception:
+                        break
 
-        bar_ts = str(df.index[-1])
+        setups = _call_evaluate_setups_mtf(
+            df_15m=df_15m,
+            df_1h=df_1h,
+            df_4h=df_4h,
+            symbol=symbol,
+            sr_out=sr_out,
+            ob_out=ob_out,
+            mtf_context=mtf_context,
+            rr_target=5.0,
+        )
+
+        bar_ts = str(df_15m.index[-1])
         for s in setups:
-            direction = str(s.get("direction") if isinstance(s, dict) else getattr(s, "direction", "SIGNAL"))
-            conf = str(s.get("confidence") if isinstance(s, dict) else getattr(s, "confidence", "15M"))
-            entry = s.get("entry") if isinstance(s, dict) else getattr(s, "entry", "n/a")
-            sl = s.get("sl") if isinstance(s, dict) else getattr(s, "sl", "n/a")
-            tp = s.get("tp") if isinstance(s, dict) else getattr(s, "tp", "n/a")
-            rr = s.get("rr") if isinstance(s, dict) else getattr(s, "rr", 5.0)
+            direction = str(_get_val(s, ("direction",), "SIGNAL"))
+            conf = str(_get_val(s, ("confidence",), "15M/1H/4H"))
+            entry = _get_val(s, ("entry",), "n/a")
+            sl = _get_val(s, ("sl",), "n/a")
+            tp = _get_val(s, ("tp",), "n/a")
+            rr = _get_val(s, ("rr",), 5.0)
 
             dedupe_key = f"{symbol}|15M|{direction}|{bar_ts}|{entry}"
             if dedupe_key in seen_set:
@@ -368,6 +676,8 @@ def _scan_once(state: dict, risk_pct: float = 2.0) -> dict:
             sig_item["execution_status"] = _try_auto_execute_virtual(sig_item, risk_pct=risk_pct)
             signals.append(sig_item)
 
+    closed_hits = _evaluate_tp_sl_hits(latest_prices)
+    state["last_tp_sl_closed"] = closed_hits
     state["scanned_assets"] = scanned
     state["signals"] = signals[-MAX_SIGNALS:]
     state["seen_keys"] = seen_keys[-200:]
@@ -403,8 +713,9 @@ def run_worker_loop() -> None:
 
     while _RUNNING:
         try:
+            risk_val = float(os.getenv("AUTO_EXEC_RISK_PCT", "2.0") or "2.0")
             state["cycle_count"] = int(state.get("cycle_count", 0)) + 1
-            state = _scan_once(state)
+            state = _scan_once(state, risk_pct=risk_val)
             state["status"] = "running"
             state["updated_utc"] = _utc_now_str()
             _write_state_atomic(state)
