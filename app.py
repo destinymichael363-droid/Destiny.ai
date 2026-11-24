@@ -3498,5 +3498,18 @@ def _close_virtual_position_safe(
         side == "LONG"
         and signed_units < 0
     ):
+            signed_units = units_val
+
+    if (
+        side == "SHORT"
+        and signed_units > 0
+    ):
+        signed_units = -signed_units
+
+    elif (
+        side == "LONG"
+        and signed_units < 0
+    ):
         signed_units = abs(
             signed_units
+        )
