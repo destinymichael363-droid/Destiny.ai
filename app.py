@@ -25,9 +25,20 @@ from broker_and_account import BrokerSession, VirtualAccount
 from ob_fvg_engine import run_ob_fvg_engine
 from sr_engine import run_sr_zones_engine
 
-from strategy_engine import evaluate_setups as _evaluate_setups  # type: ignore
+try:
+    from strategy_engine import evaluate_setups as _evaluate_setups  # type: ignore
 except Exception:
     _evaluate_setups = None
+
+try:
+    import notifications as _notifications  # type: ignore
+except Exception:
+    _notifications = None
+
+try:
+    from worker import run_worker_scan_once as _run_worker_scan_once  # type: ignore
+except Exception:
+    _run_worker_scan_once = None
 
 try:
     import notifications as _notifications  # type: ignore
