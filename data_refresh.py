@@ -81,11 +81,7 @@ def refresh_market_data():
         except Exception:
             logging.exception("Refresh failed for %s", symbol)
 
-
 if __name__ == "__main__":
-    logging.info("Destiny AI data refresh service started")
-
-    while True:
-        refresh_market_data()
-        logging.info("Next refresh in 15 minutes")
-        time.sleep(REFRESH_SECONDS)
+    logging.info("Destiny AI data refresh started")
+    refresh_market_data()
+    logging.info("Destiny AI data refresh completed")
