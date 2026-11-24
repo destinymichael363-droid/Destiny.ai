@@ -5,6 +5,7 @@ import os
 import random
 import smtplib
 import ssl
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -181,6 +182,25 @@ def _supabase_load_worker_state() -> dict | None:
     except Exception:
         return None
     return None
+
+
+@st.cache_resource
+def _start_background_scanner_once(interval_sec: int = 60) -> bool:
+    if not callable(_run_worker_scan_once):
+        return False
+
+    def _bg_loop() -> None:
+        while True:
+            try:
+                risk_val = float(os.getenv("AUTO_EXEC_RISK_PCT", "2.0") or "2.0")
+                _run_worker_scan_once(status_label="auto_bg_running", risk_pct=risk_val)
+            except Exception:
+                pass
+            time.sleep(max(20, int(interval_sec)))
+
+    t = threading.Thread(target=_bg_loop, name="destiny_bg_scanner", daemon=True)
+    t.start()
+    return True
 
 
 def _clean_ohlcv(df: pd.DataFrame | None) -> pd.DataFrame:
@@ -1377,20 +1397,32 @@ def _load_worker_state_for_ui() -> dict | None:
     return _supabase_load_worker_state()
 
 
-def render_worker_panel() -> None:
+def render_worker_panel(user: str, risk_pct: float) -> None:
     st.subheader("24/7 Cloud Worker Feed (`data/worker_state.json`)")
 
-    if st.button("Run Worker Scan Now"):
+    auto_exec_virtual = st.checkbox(
+        "Auto-Execute Virtual Trades on New Worker Signals",
+        value=os.getenv("AUTO_EXEC_VIRTUAL", "false").strip().lower() in ("1", "true", "yes", "on"),
+        help="Automatically opens virtual positions using your risk % when new signals are logged.",
+    )
+    os.environ["AUTO_EXEC_VIRTUAL"] = "true" if auto_exec_virtual else "false"
+    os.environ["AUTO_EXEC_USER"] = user
+    os.environ["AUTO_EXEC_RISK_PCT"] = str(float(risk_pct))
+
+    if st.button("Scan Now (Force Cycle)"):
         if callable(_run_worker_scan_once):
             with st.spinner("Running 15M scan across watchlist..."):
-                _run_worker_scan_once(status_label="manual_scan_ok")
+                _run_worker_scan_once(status_label="manual_scan_ok", risk_pct=float(risk_pct))
+            loaded_acct, loaded_closed = _load_or_init_virtual_account(user)
+            st.session_state["virtual_account"] = loaded_acct
+            st.session_state["closed_positions_log"] = loaded_closed
             st.rerun()
         else:
             st.warning("`run_worker_scan_once` not found in `worker.py`.")
 
     state = _load_worker_state_for_ui()
     if not isinstance(state, dict):
-        st.info("Worker state file not found yet. Tap **Run Worker Scan Now** or run `python worker.py` in a background worker service.")
+        st.info("Background worker is initializing. Wait a moment or tap **Scan Now (Force Cycle)**.")
         return
 
     st.caption(
@@ -1420,6 +1452,8 @@ def _run_app() -> None:
         return
 
     user = str(st.session_state["auth_user"])
+    _start_background_scanner_once(interval_sec=60)
+
     if "virtual_account" not in st.session_state:
         loaded_acct, loaded_closed = _load_or_init_virtual_account(user)
         st.session_state["virtual_account"] = loaded_acct
@@ -1625,7 +1659,7 @@ def _run_app() -> None:
     render_strategy_setups(setups)
 
     st.divider()
-    render_worker_panel()
+    render_worker_panel(user=user, risk_pct=float(risk_pct))
 
     with st.expander("Broker Session Status"):
         if broker.connected:
