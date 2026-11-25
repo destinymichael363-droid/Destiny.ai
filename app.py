@@ -890,6 +890,6 @@ def render_market_scanner() -> None:
 
 if current_page == "Market Scanner":
     render_market_scanner()
-        signals = state.get("signals", [])
+   
 
 
