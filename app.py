@@ -730,13 +730,7 @@ def render_market_scanner() -> None:
 
     signals = state.get("signals", [])
 
-    st.write(
-        "DEBUG - Saved signals:",
-        len(signals),
-    )
-
-    if signals:
-        st.json(signals[:3])
+    
     # --------------------------------------------------------
     # STATUS
     # --------------------------------------------------------
