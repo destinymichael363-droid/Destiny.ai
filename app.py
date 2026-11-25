@@ -670,8 +670,7 @@ def render_account_overview() -> None:
 
 if current_page == "Dashboard":
     render_account_overview()
-if current_page == "Dashboard":
-    render_account_overview()
+
 # ============================================================
 # SECTION 6: MARKET SCANNER
 # ============================================================
@@ -883,3 +882,9 @@ def render_market_scanner() -> None:
 
 if current_page == "Market Scanner":
     render_market_scanner()
+        signals = state.get("signals", [])
+
+    st.write("DEBUG — Saved signals:", len(signals))
+
+    if signals:
+        st.json(signals[:3])
