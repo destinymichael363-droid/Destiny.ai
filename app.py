@@ -716,7 +716,7 @@ def render_market_scanner() -> None:
             ) as fh:
                 state = json.load(fh)
 
-    except Exception:
+        except Exception:
         log.exception(
             "Could not load worker state."
         )
@@ -724,6 +724,17 @@ def render_market_scanner() -> None:
         st.warning(
             "Worker state could not be loaded."
         )
+
+    # DEBUG: CHECK SAVED SIGNALS
+    signals = state.get("signals", [])
+
+    st.write(
+        "DEBUG - Saved signals:",
+        len(signals),
+    )
+
+    if signals:
+        st.json(signals[:3])
 
     # --------------------------------------------------------
     # STATUS
