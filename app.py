@@ -852,7 +852,31 @@ def render_market_scanner() -> None:
             st.error(
                 f"Market scan failed: {exc}"
     )
+    # --------------------------------------------------------
+    # STRATEGY ENGINE DIAGNOSTIC
+    # --------------------------------------------------------
 
+    if (
+        WORKER_AVAILABLE
+        and getattr(
+            worker_module,
+            "_evaluate_setups",
+            None,
+        ) is None
+    ):
+        st.error(
+            "strategy_engine.py could not be loaded."
+        )
+
+        try:
+            import strategy_engine
+
+            st.success(
+                "strategy_engine.py loaded successfully."
+            )
+
+        except Exception as exc:
+            st.exception(exc)
 # ============================================================
 # MARKET SCANNER PAGE ROUTING
 # ============================================================
