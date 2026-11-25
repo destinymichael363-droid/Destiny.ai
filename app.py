@@ -3466,7 +3466,7 @@ def _close_virtual_position_safe(
         )
     )
 
-        if not hasattr(
+            if not hasattr(
         pos,
         "margin_used",
     ):
@@ -3500,4 +3500,4 @@ def _close_virtual_position_safe(
     ):
         signed_units = abs(
             signed_units
-    )
+            )
