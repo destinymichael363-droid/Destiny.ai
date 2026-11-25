@@ -3453,51 +3453,64 @@ def _close_virtual_position_safe(
         )
     )
 
-    units_val = float(
+        units_val = float(
         _get_val(
             pos,
-            (
-                "units",
-                "size",
-                "qty",
-                "quantity",
-            ),
+            ("units", "size", "qty", "quantity"),
             1.0,
         )
     )
 
-            if not hasattr(
-        pos,
-        "margin_used",
-    ):
+    if not hasattr(pos, "margin_used"):
         try:
             setattr(
                 pos,
                 "margin_used",
-                max(
-                    0.0,
-                    abs(
-                        units_val
-                        * entry_p
-                    )
-                    * 0.05,
-                ),
+                max(0.0, abs(units_val * entry_p) * 0.05),
             )
         except Exception:
             pass
 
     signed_units = units_val
 
-    if (
-        side == "SHORT"
-        and signed_units > 0
-    ):
+    if side == "SHORT" and signed_units > 0:
         signed_units = -signed_units
+    elif side == "LONG" and signed_units < 0:
+        signed_units = abs(signed_units)
 
-    elif (
-        side == "LONG"
-        and signed_units < 0
-    ):
-        signed_units = abs(
-            signed_units
+    realized = (exit_px - entry_p) * signed_units
+
+    if max_pnl_cap is not None and max_pnl_cap > 0:
+        realized = max(-max_pnl_cap, min(max_pnl_cap, realized))
+
+    realized = round(float(realized), 2)
+
+    margin_back = float(getattr(pos, "margin_used", 0.0) or 0.0)
+
+    try:
+        positions.pop(pos_index)
+        if hasattr(acct, "balance"):
+            acct.balance = round(
+                float(acct.balance) + margin_back + realized,
+                2,
             )
+    except Exception as exc:
+        return False, f"Could not close position ({exc})."
+
+    closed_log.append(
+        {
+            "symbol": sym,
+            "side": side,
+            "entry_price": entry_p,
+            "exit_price": float(exit_px),
+            "stop_loss": sl_p,
+            "take_profit": tp_p,
+            "units": units_val,
+            "pnl": realized,
+            "closed_utc": datetime.now(timezone.utc).isoformat(),
+        }
+    )
+
+    _save_virtual_account(username, acct, closed_log)
+
+    return True, f"Closed {side} {sym} @ {exit_px:.5f} (P&L {realized:+.2f})."
