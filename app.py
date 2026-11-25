@@ -889,7 +889,7 @@ def render_market_scanner() -> None:
 # ============================================================
 
 
-if current_page == "Trading Signals":
+
     render_trading_signals()
 # ============================================================
 # MARKET SCANNER PAGE ROUTING
