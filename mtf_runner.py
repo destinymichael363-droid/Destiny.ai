@@ -561,7 +561,7 @@ def run_closed_candle_5tf_cascade(
     # =============================================================
     # 1. Build each timeframe from closed candles only
     # =============================================================
-    for tf in timeframe_order:
+        for tf in timeframe_order:
         closed_df = _closed_only(
             frames_by_tf.get(tf)
         )
@@ -581,7 +581,7 @@ def run_closed_candle_5tf_cascade(
             }
             continue
 
-                sr_res = run_sr_zones_engine(
+        sr_res = run_sr_zones_engine(
             closed_df,
             tf_label=tf,
         )
@@ -603,7 +603,7 @@ def run_closed_candle_5tf_cascade(
     tf_trends = {
         tf: _get_trend(tf, results)
         for tf in timeframe_order
-    }
+            }
 
     t_4h = tf_trends["4H"]
     t_1h = tf_trends["1H"]
