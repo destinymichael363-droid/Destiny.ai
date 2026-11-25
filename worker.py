@@ -2969,7 +2969,40 @@ def _scan_once(
                 symbol
             ] = bar_ts
 
-        except Exception as exc:
+                except Exception as exc:
             # One instrument cannot kill the entire scanner.
             log.exception(
-                "scan
+                "scan failed for %s: %s",
+                symbol,
+                exc,
+            )
+
+            warnings.append(
+                f"{symbol}: scan failed: {exc}"
+            )
+
+            continue
+
+    state.update(
+        {
+            "status": "running",
+            "updated_utc": _utc_now_str(),
+            "cycle_count": int(
+                state.get("cycle_count", 0)
+            ) + 1,
+            "scanned_assets": scanned,
+            "signals": signals[-MAX_SIGNALS:],
+            "seen_keys": seen_keys[-2000:],
+            "last_bar": last_bar,
+            "warnings": warnings,
+        }
+    )
+
+    _evaluate_tp_sl_hits_for_users(
+        price_bars,
+        users_to_process,
+    )
+
+    _write_state_atomic(state)
+
+    return state
