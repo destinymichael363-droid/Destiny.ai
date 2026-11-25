@@ -812,22 +812,34 @@ def render_market_scanner() -> None:
 
     st.divider()
 
+       # --------------------------------------------------------
+    # RUN SCANNER
     # --------------------------------------------------------
-    # REFRESH
-    # --------------------------------------------------------
 
-    if st.button("Run Scanner Now", use_container_width=True):
-    try:
-        with st.spinner("Scanning markets..."):
-            worker_module._scan_once()
+    if st.button(
+        "Run Scanner Now",
+        use_container_width=True,
+    ):
+        try:
+            with st.spinner(
+                "Scanning markets..."
+            ):
+                worker_module._scan_once()
 
-        st.success("Market scan completed.")
-        st.rerun()
+            st.success(
+                "Market scan completed."
+            )
 
-    except Exception as exc:
-        log.exception("Manual market scan failed")
-        st.error(f"Market scan failed: {exc}")
-    
+            st.rerun()
+
+        except Exception as exc:
+            log.exception(
+                "Manual market scan failed"
+            )
+
+            st.error(
+                f"Market scan failed: {exc}"
+    ) 
 
 # ============================================================
 # MARKET SCANNER PAGE ROUTING
