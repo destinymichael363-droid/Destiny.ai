@@ -670,3 +670,162 @@ def render_account_overview() -> None:
 
 if current_page == "Dashboard":
     render_account_overview()
+if current_page == "Dashboard":
+    render_account_overview()
+# ============================================================
+# SECTION 6: MARKET SCANNER
+# ============================================================
+
+def render_market_scanner() -> None:
+    """Display the live market scanner."""
+
+    st.subheader("Market Scanner")
+
+    if not WORKER_AVAILABLE:
+        st.error(
+            "Worker module is unavailable."
+        )
+        return
+
+    st.caption(
+        "Live market scanning and multi-timeframe strategy status."
+    )
+
+    # --------------------------------------------------------
+    # WORKER STATE
+    # --------------------------------------------------------
+
+    state = {}
+
+    try:
+        if WORKER_STATE_PATH.exists():
+            with open(
+                WORKER_STATE_PATH,
+                "r",
+                encoding="utf-8",
+            ) as fh:
+                state = json.load(fh)
+
+    except Exception:
+        log.exception(
+            "Could not load worker state."
+        )
+
+        st.warning(
+            "Worker state could not be loaded."
+        )
+
+    # --------------------------------------------------------
+    # STATUS
+    # --------------------------------------------------------
+
+    status = state.get(
+        "status",
+        "unknown",
+    )
+
+    updated_utc = state.get(
+        "updated_utc",
+        "Never",
+    )
+
+    cycle_count = state.get(
+        "cycle_count",
+        0,
+    )
+
+    col1, col2, col3 = st.columns(3)
+
+    with col1:
+        st.metric(
+            "Scanner Status",
+            str(status).upper(),
+        )
+
+    with col2:
+        st.metric(
+            "Scan Cycles",
+            int(cycle_count),
+        )
+
+    with col3:
+        st.metric(
+            "Last Update",
+            str(updated_utc),
+        )
+
+    st.divider()
+
+    # --------------------------------------------------------
+    # SCANNED ASSETS
+    # --------------------------------------------------------
+
+    st.subheader("Scanned Instruments")
+
+    scanned = state.get(
+        "scanned_assets",
+        [],
+    )
+
+    if scanned:
+        rows = []
+
+        for symbol in scanned:
+            rows.append(
+                {
+                    "Symbol": symbol,
+                    "Status": "Scanned",
+                }
+            )
+
+        st.dataframe(
+            pd.DataFrame(rows),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    else:
+        st.info(
+            "No instruments have been scanned yet."
+        )
+
+    st.divider()
+
+    # --------------------------------------------------------
+    # WARNINGS
+    # --------------------------------------------------------
+
+    warnings = state.get(
+        "warnings",
+        [],
+    )
+
+    st.subheader("Scanner Messages")
+
+    if warnings:
+        for warning in warnings:
+            st.warning(str(warning))
+    else:
+        st.success(
+            "No scanner warnings reported."
+        )
+
+    st.divider()
+
+    # --------------------------------------------------------
+    # REFRESH
+    # --------------------------------------------------------
+
+    if st.button(
+        "Refresh Scanner",
+        use_container_width=True,
+    ):
+        st.rerun()
+
+
+# ============================================================
+# MARKET SCANNER PAGE ROUTING
+# ============================================================
+
+if current_page == "Market Scanner":
+    render_market_scanner()
