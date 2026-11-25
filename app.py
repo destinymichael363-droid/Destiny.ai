@@ -686,7 +686,6 @@ if current_page == "Dashboard":
 # ============================================================
 
 def render_market_scanner() -> None:
-    def render_market_scanner() -> None:
     """Display the live market scanner."""
 
     st.subheader("Market Scanner")
