@@ -812,7 +812,7 @@ def render_market_scanner() -> None:
 
     st.divider()
 
-       # --------------------------------------------------------
+           # --------------------------------------------------------
     # RUN SCANNER
     # --------------------------------------------------------
 
@@ -821,10 +821,22 @@ def render_market_scanner() -> None:
         use_container_width=True,
     ):
         try:
+            state = {}
+
+            if WORKER_STATE_PATH.exists():
+                with open(
+                    WORKER_STATE_PATH,
+                    "r",
+                    encoding="utf-8",
+                ) as fh:
+                    state = json.load(fh)
+
             with st.spinner(
                 "Scanning markets..."
             ):
-                worker_module._scan_once()
+                worker_module._scan_once(
+                    state
+                )
 
             st.success(
                 "Market scan completed."
@@ -839,7 +851,7 @@ def render_market_scanner() -> None:
 
             st.error(
                 f"Market scan failed: {exc}"
-    ) 
+    )
 
 # ============================================================
 # MARKET SCANNER PAGE ROUTING
