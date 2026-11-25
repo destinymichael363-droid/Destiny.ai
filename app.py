@@ -894,7 +894,4 @@ if current_page == "Market Scanner":
     render_market_scanner()
         signals = state.get("signals", [])
 
-    st.write("DEBUG — Saved signals:", len(signals))
 
-    if signals:
-        st.json(signals[:3])
