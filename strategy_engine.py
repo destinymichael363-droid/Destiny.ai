@@ -26,13 +26,32 @@ def _safe_float(
     default: float = 0.0,
 ) -> float:
     """Safely convert a value to float."""
-
     try:
         if value is None:
             return default
 
         if isinstance(value, bool):
             return default
+
+        result = float(value)
+
+        if pd.isna(result):
+            return default
+
+        return result
+
+    except Exception:
+        return default
+
+        result = float(value)
+
+        if pd.isna(result):
+            return default
+
+        return result
+
+    except Exception:
+        return default
 
         result = float(value)
 
