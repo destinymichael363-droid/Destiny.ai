@@ -688,7 +688,7 @@ if current_page == "Dashboard":
 def render_market_scanner() -> None:
     """Display the live market scanner."""
 
-            st.warning(
+                    st.warning(
             "Worker state could not be loaded."
         )
 
@@ -703,6 +703,7 @@ def render_market_scanner() -> None:
     if signals:
         st.json(signals[:3])
 
+    # Your scanner status display continues here
     # Your scanner status display continues here
 
     # --------------------------------------------------------
