@@ -686,25 +686,20 @@ if current_page == "Dashboard":
 # ============================================================
 
 def render_market_scanner() -> None:
+    def render_market_scanner() -> None:
     """Display the live market scanner."""
 
-                    st.warning(
-            "Worker state could not be loaded."
+    st.subheader("Market Scanner")
+
+    if not WORKER_AVAILABLE:
+        st.error(
+            "Worker module is unavailable."
         )
+        return
 
-    # PASTE DEBUG CODE HERE
-    signals = state.get("signals", [])
-
-    st.write(
-        "DEBUG - Saved signals:",
-        len(signals),
+    st.caption(
+        "Live market scanning and multi-timeframe strategy status."
     )
-
-    if signals:
-        st.json(signals[:3])
-
-    # Your scanner status display continues here
-    # Your scanner status display continues here
 
     # --------------------------------------------------------
     # WORKER STATE
