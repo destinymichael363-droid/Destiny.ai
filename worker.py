@@ -2963,9 +2963,9 @@ def _scan_once(
                     sig_item
                 )
 
-            # Only mark the bar processed after the entire strategy
+                        # Only mark the bar processed after the entire strategy
             # evaluation completed successfully.
-                        last_bar[
+            last_bar[
                 symbol
             ] = bar_ts
 
@@ -2982,19 +2982,7 @@ def _scan_once(
             )
 
             continue
-            # One instrument cannot kill the entire scanner.
-            log.exception(
-                "scan failed for %s: %s",
-                symbol,
-                exc,
-            )
-
-            warnings.append(
-                f"{symbol}: scan failed: {exc}"
-            )
-
-            continue
-
+            
     state.update(
         {
             "status": "running",
