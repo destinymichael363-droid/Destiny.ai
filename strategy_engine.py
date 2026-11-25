@@ -1,21 +1,24 @@
-from future import annotations
+from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any
 
 import pandas as pd
+
 from mtf_runner import run_closed_candle_5tf_cascade
+
+
 @dataclass
 class TradeSetup:
-symbol: str
-tf_label: str
-direction: str
-entry: float
-sl: float
-tp: float
-rr: float
-confidence: str
-reason: str
+    symbol: str
+    tf_label: str
+    direction: str
+    entry: float
+    sl: float
+    tp: float
+    rr: float
+    confidence: str
+    reason: str
 
 def _safe_float(
 value: Any,
