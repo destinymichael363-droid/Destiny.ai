@@ -724,11 +724,9 @@ def render_market_scanner() -> None:
             "Worker state could not be loaded."
         )
 
-    # --------------------------------------------------------
-    # DEBUG: SAVED TRADING SIGNALS
-    # --------------------------------------------------------
+    
 
-    signals = state.get("signals", [])
+    
 
     
     # --------------------------------------------------------
