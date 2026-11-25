@@ -556,3 +556,124 @@ def render_dashboard() -> None:
 
 if current_page == "Dashboard":
     render_dashboard()
+
+# ============================================================
+# SECTION 5: VIRTUAL ACCOUNT OVERVIEW
+# ============================================================
+
+def render_account_overview() -> None:
+    st.subheader("Virtual Trading Account")
+
+    if not WORKER_AVAILABLE:
+        st.warning("Worker module is unavailable.")
+        return
+
+    username = st.session_state.username
+
+    try:
+        with worker_module._account_lock(username):
+            acct, closed_log, prefs = (
+                worker_module._load_virtual_account_obj(
+                    username
+                )
+            )
+
+        balance = float(
+            getattr(acct, "balance", 0.0)
+        )
+
+        positions = list(
+            getattr(acct, "positions", []) or []
+        )
+
+        closed_trades = list(
+            closed_log or []
+        )
+
+        col1, col2, col3 = st.columns(3)
+
+        with col1:
+            st.metric(
+                "Account Balance",
+                f"${balance:,.2f}",
+            )
+
+        with col2:
+            st.metric(
+                "Open Positions",
+                len(positions),
+            )
+
+        with col3:
+            st.metric(
+                "Closed Trades",
+                len(closed_trades),
+            )
+
+        st.caption(
+            "Virtual account belonging to "
+            f"{username}"
+        )
+
+        st.divider()
+
+        st.markdown("**Virtual Execution Settings**")
+
+        col1, col2 = st.columns(2)
+
+        with col1:
+            st.metric(
+                "Risk Per Trade",
+                f"{float(prefs.get('risk_pct', 2.0)):.2f}%",
+            )
+
+        with col2:
+            st.metric(
+                "Automatic Execution",
+                (
+                    "Enabled"
+                    if prefs.get("auto_exec_virtual", True)
+                    else "Disabled"
+                ),
+            )
+
+        st.markdown("**Open Positions**")
+
+        if positions:
+            position_rows = []
+
+            for pos in positions:
+                position_rows.append({
+                    "Symbol": getattr(pos, "symbol", ""),
+                    "Side": getattr(pos, "side", ""),
+                    "Entry": getattr(pos, "entry_price", 0.0),
+                    "Stop Loss": getattr(pos, "stop_loss", 0.0),
+                    "Take Profit": getattr(pos, "take_profit", 0.0),
+                    "Units": getattr(pos, "units", 0.0),
+                })
+
+            st.dataframe(
+                pd.DataFrame(position_rows),
+                use_container_width=True,
+                hide_index=True,
+            )
+        else:
+            st.info("There are currently no open positions.")
+
+    except Exception:
+        log.exception(
+            "Could not load virtual account for %s",
+            username,
+        )
+        st.error(
+            "Unable to load your virtual account. "
+            "Check the application logs."
+        )
+
+
+# ============================================================
+# ADD ACCOUNT OVERVIEW TO DASHBOARD
+# ============================================================
+
+if current_page == "Dashboard":
+    render_account_overview()
