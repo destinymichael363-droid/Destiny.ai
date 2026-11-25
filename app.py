@@ -95,13 +95,6 @@ except Exception:
 
     AUTH_AVAILABLE = False
 
-except Exception:
-    log.exception(
-        "Authentication module import failed"
-    )
-
-    AUTH_AVAILABLE = False
-
 
 try:
     from broker_and_account import VirtualAccount
