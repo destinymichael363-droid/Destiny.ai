@@ -890,6 +890,87 @@ def render_market_scanner() -> None:
 
 if current_page == "Market Scanner":
     render_market_scanner()
-   
+if current_page == "Trading Signals":
+    render_trading_signals()
+# ============================================================
+# MARKET SCANNER PAGE ROUTING
+# ============================================================
+def render_trading_signals() -> None:
+    """Display generated trading signals."""
 
+    st.subheader("Trading Signals")
+
+    if not WORKER_STATE_PATH.exists():
+        st.info("No trading signals available yet.")
+        return
+
+    try:
+        with open(
+            WORKER_STATE_PATH,
+            "r",
+            encoding="utf-8",
+        ) as fh:
+            state = json.load(fh)
+
+    except Exception as exc:
+        st.error(
+            f"Could not load trading signals: {exc}"
+        )
+        return
+
+    signals = state.get("signals", [])
+
+    if not signals:
+        st.info(
+            "No trading signals generated yet. "
+            "The scanner is running, but no valid setup has been confirmed."
+        )
+        return
+
+    for signal in reversed(signals):
+
+        with st.container(border=True):
+
+            st.markdown(
+                f"### {signal.get('symbol', 'Unknown')}"
+            )
+
+            col1, col2, col3 = st.columns(3)
+
+            col1.metric(
+                "Direction",
+                signal.get("direction", "N/A"),
+            )
+
+            col2.metric(
+                "Entry",
+                signal.get("entry", "N/A"),
+            )
+
+            col3.metric(
+                "Stop Loss",
+                signal.get("sl", "N/A"),
+            )
+
+            col1, col2, col3 = st.columns(3)
+
+            col1.metric(
+                "Take Profit",
+                signal.get("tp", "N/A"),
+            )
+
+            col2.metric(
+                "Risk/Reward",
+                signal.get("rr", "N/A"),
+            )
+
+            col3.metric(
+                "Confidence",
+                signal.get("confidence", "N/A"),
+            )
+
+            st.write(
+                "Reason:",
+                signal.get("reason", "No explanation provided."),
+            )
 
