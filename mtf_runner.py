@@ -581,21 +581,21 @@ def run_closed_candle_5tf_cascade(
             }
             continue
 
-        sr_res = run_sr_zones_engine(
-    closed_df,
-    tf_label=tf,
-)
+                sr_res = run_sr_zones_engine(
+            closed_df,
+            tf_label=tf,
+        )
 
-ob_res = run_ob_fvg_engine(
-    closed_df,
-    timeframe_minutes=tf_minutes_map[tf],
-)
+        ob_res = run_ob_fvg_engine(
+            closed_df,
+            timeframe_minutes=tf_minutes_map[tf],
+        )
 
-results[tf] = {
-    "df": closed_df,
-    "sr": sr_res,
-    "ob_fvg": ob_res,
-}
+        results[tf] = {
+            "df": closed_df,
+            "sr": sr_res,
+            "ob_fvg": ob_res,
+        }
 
     # =============================================================
     # 2. Read directional trends
