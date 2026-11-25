@@ -391,3 +391,168 @@ if not st.session_state.get(
     authentication_screen()
 
     st.stop()
+# ============================================================
+# SECTION 3: SIDEBAR NAVIGATION
+# ============================================================
+
+PAGES = [
+    "Dashboard",
+    "Market Scanner",
+    "Trading Signals",
+    "Open Positions",
+    "Trade History",
+    "Account",
+    "Settings",
+]
+
+
+def render_sidebar() -> str:
+    """Render the main navigation sidebar."""
+
+    st.sidebar.title("🎯 DESTINY AI")
+    st.sidebar.caption("Multi-Timeframe Trading System")
+    st.sidebar.divider()
+
+    current_page = st.session_state.get("page", "Dashboard")
+
+    if current_page not in PAGES:
+        current_page = "Dashboard"
+
+    selected_page = st.sidebar.radio(
+        "Navigation",
+        PAGES,
+        index=PAGES.index(current_page),
+        key="main_navigation",
+    )
+
+    st.session_state.page = selected_page
+
+    st.sidebar.divider()
+
+    st.sidebar.markdown(
+        f"**Logged in as:** {st.session_state.username}"
+    )
+
+    if st.sidebar.button(
+        "Logout",
+        use_container_width=True,
+    ):
+        _logout_user()
+
+    return selected_page
+
+
+# ============================================================
+# SECTION 3B: PAGE HEADER
+# ============================================================
+
+current_page = render_sidebar()
+
+st.title(f"🎯 DESTINY AI — {current_page}")
+
+st.caption(
+    "Intelligent Multi-Timeframe Trading Platform"
+)
+
+st.divider()
+
+# ============================================================
+# SECTION 4: DASHBOARD OVERVIEW
+# ============================================================
+
+def render_dashboard() -> None:
+    """Display the main DESTINY AI system overview."""
+
+    st.subheader("System Overview")
+
+    # SYSTEM STATUS
+    col1, col2, col3 = st.columns(3)
+
+    with col1:
+        st.metric(
+            "Worker Module",
+            "Connected" if WORKER_AVAILABLE else "Unavailable",
+        )
+
+    with col2:
+        st.metric(
+            "Account Module",
+            "Connected" if ACCOUNT_AVAILABLE else "Unavailable",
+        )
+
+    with col3:
+        st.metric(
+            "Authentication",
+            "Active" if AUTH_AVAILABLE else "Unavailable",
+        )
+
+    st.divider()
+
+    # TRADING CONFIGURATION
+    st.subheader("Trading Configuration")
+
+    col1, col2, col3 = st.columns(3)
+
+    with col1:
+        st.metric(
+            "Risk Per Trade",
+            f"{st.session_state.risk_pct:.2f}%",
+        )
+
+    with col2:
+        st.metric(
+            "Target Risk-to-Reward",
+            f"1:{st.session_state.rr_target:.1f}",
+        )
+
+    with col3:
+        st.metric(
+            "Strategy Timeframes",
+            len(STRATEGY_TIMEFRAMES),
+        )
+
+    st.divider()
+
+    # WATCHLIST
+    st.subheader("Market Watchlist")
+
+    watchlist_data = [
+        {
+            "Instrument": name,
+            "Symbol": symbol,
+        }
+        for name, symbol in WATCHLIST
+    ]
+
+    st.dataframe(
+        pd.DataFrame(watchlist_data),
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    st.divider()
+
+    # TIMEFRAME CASCADE
+    st.subheader("Multi-Timeframe Strategy")
+
+    timeframe_columns = st.columns(5)
+
+    for column, timeframe in zip(
+        timeframe_columns,
+        STRATEGY_TIMEFRAMES,
+    ):
+        with column:
+            st.markdown(f"**{timeframe}**")
+
+    st.caption(
+        "4H market location → 1H confirmation → "
+        "15M setup → 5M/1M execution."
+    )
+
+
+# ============================================================
+# DASHBOARD PAGE ROUTING
+# ============================================================
+
+if current_page == "Dashboard":
+    render_dashboard()
