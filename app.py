@@ -817,10 +817,29 @@ def render_market_scanner() -> None:
     # --------------------------------------------------------
 
     if st.button(
-        "Refresh Scanner",
-        use_container_width=True,
-    ):
+    "Run Scanner Now",
+    use_container_width=True,
+):
+    try:
+        with st.spinner(
+            "Scanning markets..."
+        ):
+            worker_module._scan_once()
+
+        st.success(
+            "Market scan completed."
+        )
+
         st.rerun()
+
+    except Exception as exc:
+        log.exception(
+            "Manual market scan failed"
+        )
+
+        st.error(
+            f"Market scan failed: {exc}"
+        )
 
 
 # ============================================================
