@@ -840,7 +840,7 @@ def render_market_scanner() -> None:
         st.error(
             f"Market scan failed: {exc}"
         )
-
+    
 
 # ============================================================
 # MARKET SCANNER PAGE ROUTING
