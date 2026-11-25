@@ -23,17 +23,22 @@ class ScalpSignal:
     sweep_summary: str
 
 
-def _closed_only(df: pd.DataFrame | None) -> pd.DataFrame:
+def _closed_only(
+    df: pd.DataFrame | None,
+) -> pd.DataFrame:
     """
-    Return only fully closed candles.
+    Keep the supplied data because worker.py
+    already removes all forming candles.
 
-    The final row is assumed to be the currently forming candle and is
-    therefore excluded to prevent lookahead bias.
+    Do not remove another closed candle.
     """
-    if df is None or len(df) < 3:
+    if (
+        df is None
+        or len(df) < 3
+    ):
         return pd.DataFrame()
 
-    return df.iloc[:-1].copy()
+    return df.copy()
 
 
 def _zones_overlap(
