@@ -557,11 +557,10 @@ def run_closed_candle_5tf_cascade(
     ]
 
     results: dict[str, dict] = {}
-
     # =============================================================
     # 1. Build each timeframe from closed candles only
     # =============================================================
-        for tf in timeframe_order:
+    for tf in timeframe_order:
         closed_df = _closed_only(
             frames_by_tf.get(tf)
         )
