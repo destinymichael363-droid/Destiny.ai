@@ -662,16 +662,9 @@ def render_account_overview() -> None:
             "Unable to load your virtual account. "
             "Check the application logs."
         )
-            # DEBUG: CHECK SAVED TRADING SIGNALS
-    signals = state.get("signals", [])
+            
 
-    st.write(
-        "DEBUG - Saved signals:",
-        len(signals),
-    )
-
-    if signals:
-        st.json(signals[:3])
+    
 
 
 # ============================================================
