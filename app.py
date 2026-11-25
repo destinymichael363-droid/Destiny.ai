@@ -888,8 +888,7 @@ def render_market_scanner() -> None:
 # MARKET SCANNER PAGE ROUTING
 # ============================================================
 
-if current_page == "Market Scanner":
-    render_market_scanner()
+
 if current_page == "Trading Signals":
     render_trading_signals()
 # ============================================================
@@ -973,4 +972,12 @@ def render_trading_signals() -> None:
                 "Reason:",
                 signal.get("reason", "No explanation provided."),
             )
+# ============================================================
+# PAGE ROUTING
+# ============================================================
 
+if current_page == "Market Scanner":
+    render_market_scanner()
+
+elif current_page == "Trading Signals":
+    render_trading_signals()
