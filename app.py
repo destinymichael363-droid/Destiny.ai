@@ -31,14 +31,9 @@ except Exception:
     _evaluate_setups = None
 
 try:
-    import notifications as _notifications  # type: ignore
+    import mtf_runner as _mtf_runner  # type: ignore
 except Exception:
-    _notifications = None
-
-try:
-    from worker import run_worker_scan_once as _run_worker_scan_once  # type: ignore
-except Exception:
-    _run_worker_scan_once = None
+    _mtf_runner = None
 
 try:
     import notifications as _notifications  # type: ignore
