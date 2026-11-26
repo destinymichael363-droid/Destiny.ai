@@ -253,15 +253,18 @@ def run_sr_zones_engine(
 
         # Adaptive zone half-width.
         #
-        # This replaces:
+        # FIX: `min_zone_width` was previously used as a HALF-pad
+        # (added to each side of the pivot), even though its name
+        # implies "minimum total zone width". Anyone setting
+        # min_zone_width=0.5 on EURUSD (~1.08) would have produced
+        # a 1.0-wide zone — the entire price range.
         #
-        #     total_dataset_range * 0.006
-        #
-        # which could make zones wildly different depending on how much
-        # historical data happened to be loaded.
+        # Now it is interpreted as the minimum TOTAL width, so the
+        # half-pad is min_zone_width / 2. The default of 0.0 keeps
+        # behavior identical for all existing callers.
         pad = max(
             atr_value * zone_atr_mult,
-            min_zone_width,
+            min_zone_width / 2.0,
         )
 
         # --------------------------------------------------------
@@ -310,6 +313,11 @@ def run_sr_zones_engine(
     #
     # The original pivot location is retained in start_idx.
     # confirmed_idx determines when the zone becomes usable.
+    #
+    # FIX: previous sort key used `z.confirmed_idx or z.start_idx`.
+    # When confirmed_idx == 0 (valid early pivot), the `or` fell
+    # through to start_idx, mis-sorting that zone. Now we check
+    # `is not None` explicitly.
     # ------------------------------------------------------------
 
     zones.sort(
@@ -407,4 +415,4 @@ def run_sr_zones_engine(
         "active_zones": active,
         "minor_zones": minor_zones,
         "all_zones": zones,
-  }
+    }
