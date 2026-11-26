@@ -2386,9 +2386,6 @@ def _write_state_atomic(
     )
 
 
-# --------------------------------------------------------------------------- #
-# Strategy call + scan
-# --------------------------------------------------------------------------- #
 def _call_evaluate_setups_mtf(
     df_15m: pd.DataFrame,
     df_1h: pd.DataFrame,
@@ -2402,7 +2399,6 @@ def _call_evaluate_setups_mtf(
     rr_target: float = 5.0,
 ) -> list:
     """
-       """
     Pass the COMPLETE five-timeframe dataset into strategy_engine.
 
     This is the critical connection:
@@ -2430,7 +2426,7 @@ def _call_evaluate_setups_mtf(
         "15M": df_15m,
         "5M": df_5m,
         "1M": df_1m,
-}
+    }
 
     # Preserve any additional context supplied by MTF hooks.
     for key, value in (
@@ -2458,22 +2454,12 @@ def _call_evaluate_setups_mtf(
         mtf_context=mtf_context,
         mtf_data=mtf_data,
     )
-    log.warning(
-        "STRATEGY DEBUG %s: 4H=%s 1H=%s 15M=%s 5M=%s 1M=%s result=%s",
-        symbol,
-        len(df_4h),
-        len(df_1h),
-        len(df_15m),
-        len(df_5m),
-        len(df_1m),
-        len(res) if res is not None else None,
-)
+
     return (
         list(res)
         if res is not None
         else []
     )
-
 
 def _scan_once(
     state: dict,
