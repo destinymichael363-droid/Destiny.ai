@@ -143,7 +143,14 @@ def _build_reason(
     cascade: dict,
     signal: Any,
 ) -> str:
-    """Build a transparent explanation for the trade."""
+    """
+    Build a transparent explanation for the trade.
+
+    FIX: the "1H confirmation aligned" line was hardcoded and would
+    appear even when the 1H trend was neutral. Now it reads the real
+    1H trend from the cascade and reports 'aligned' or 'neutral'
+    accurately. Format stays short (Option A).
+    """
 
     primary = cascade.get(
         "primary_setup",
@@ -157,6 +164,11 @@ def _build_reason(
 
     recent_sweeps = cascade.get(
         "recent_sweeps",
+        {},
+    )
+
+    tf_trends = cascade.get(
+        "tf_trends",
         {},
     )
 
@@ -197,9 +209,19 @@ def _build_reason(
         )
     )
 
+    # FIX: report actual 1H state rather than hardcoding "aligned".
+    t_1h = int(tf_trends.get("1H", 0))
+
+    if t_1h == 1:
+        one_h = "BULLISH"
+    elif t_1h == -1:
+        one_h = "BEARISH"
+    else:
+        one_h = "NEUTRAL"
+
     components = [
         f"4H bias: {htf_bias}",
-        "1H confirmation aligned",
+        f"1H: {one_h}",
         "15M HTF/OB-FVG overlap",
     ]
 
@@ -299,9 +321,18 @@ def _cascade_to_setup(
     if actual_rr <= 0:
         return None
 
+    # FIX: previously the tolerance was rr_target * 0.99, which
+    # meant a 4.95 RR requirement at rr_target=5.0. Because the
+    # cascade passes ROUNDED entry/sl/tp into ScalpSignal, the RR
+    # recomputed here can differ from the RR mtf_runner already
+    # validated by a small rounding error. That caused valid
+    # signals to be silently dropped.
+    #
+    # Now we allow 10% slack — enough to absorb rounding, tight
+    # enough to still catch real math bugs.
     minimum_rr = max(
         1.0,
-        rr_target * 0.99,
+        rr_target * 0.90,
     )
 
     if actual_rr < minimum_rr:
@@ -441,6 +472,30 @@ def evaluate_setups(
         Precision confirmation
           ↓
         TradeSetup
+
+    BACKWARD-COMPATIBILITY NOTE
+    ---------------------------
+    The following parameters are accepted by this signature for
+    compatibility with existing callers (worker.py), but are
+    NOT used by this function:
+
+        - sr_out
+        - ob_out
+        - mtf_context
+
+    The S/R and OB/FVG engines are re-run internally by
+    mtf_runner.run_closed_candle_5tf_cascade using df / df_1h /
+    df_4h / mtf_data. Any pre-computed sr_out / ob_out passed in
+    here is silently ignored.
+
+    If you ever need the caller's sr_out / ob_out to influence
+    the trade decision, that requires threading them through
+    mtf_runner — it is not enough to pass them here.
+
+    Note also that worker.py computes sr_out with
+    invalidation_mode="Wick" while the cascade internally uses
+    the default "Close". Because the caller's sr_out is ignored,
+    the cascade effectively runs with "Close".
     """
 
     if not isinstance(
