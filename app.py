@@ -926,3 +926,16 @@ elif current_page == "Account":
 
 elif current_page == "Settings":
     render_settings()
+PAGES = [
+    "Dashboard",
+    "Market Scanner",
+    "Chart",
+    "Trading Signals",
+    "Open Positions",
+    "Trade History",
+    "Backtest",          # ← add
+    "Account",
+    "Settings",
+    ]
+elif current_page == "Backtest":
+    render_backtest_page()
