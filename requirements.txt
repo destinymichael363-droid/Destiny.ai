@@ -5,5 +5,5 @@ yfinance>=0.2.50
 plotly>=5.24
 supabase>=2.10,<3
 requests
-streamlit[auth]>=1.66.0
+streamlit[auth]==1.56.0
 httpx
