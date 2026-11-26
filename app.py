@@ -856,19 +856,18 @@ def render_market_scanner() -> None:
             )
 
             st.success(
-                "Market scan completed."
-            )
+    "Market scan completed."
+)
 
-            st.rerun()
-
-        except Exception as exc:
-            log.exception(
-                "Manual market scan failed"
-            )
-
-            st.error(
-                f"Market scan failed: {exc}"
-                    )
+st.write(
+    "DEBUG - Signals returned:",
+    len(
+        state.get(
+            "signals",
+            [],
+        )
+    ),
+)
     # --------------------------------------------------------
     # STRATEGY ENGINE DIAGNOSTIC
     # --------------------------------------------------------
