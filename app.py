@@ -271,10 +271,10 @@ PAGES = [
     "Trading Signals",
     "Open Positions",
     "Trade History",
+    "Backtest",
     "Account",
     "Settings",
 ]
-
 
 def render_sidebar() -> str:
     """Render the main navigation sidebar."""
