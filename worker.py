@@ -45,86 +45,28 @@ except Exception:
 STATE_PATH = Path("data/worker_state.json")
 VA_DIR = Path("data/virtual_accounts")
 
+# Poll interval stays local (runtime knob, not strategy constant)
 POLL_INTERVAL_SEC = int(
     os.getenv("WORKER_POLL_SEC", "30")
 )
 
-MAX_SIGNALS = int(
-    os.getenv("WORKER_MAX_SIGNALS", "25")
+# Shared strategy constants come from config.py
+from config import (
+    WORKER_WATCHLIST,
+    STRATEGY_TIMEFRAMES,
+    BASE_TF_MIN,
+    DEFAULT_RISK_PCT,
+    MAX_SIGNALS,
+    MAX_AUTO_OPEN_POSITIONS,
+    MAX_TOTAL_RISK_PCT,
+    MAX_RISK_PCT_PER_TRADE,
+    MAX_LEVERAGE,
+    MAX_CLOSED_LOG,
+    MARGIN_RATE,
+    CORRELATED_GROUPS,
+    OHLCV,
+    INTERVAL_MINUTES as _INTERVAL_MINUTES,
 )
-
-MAX_AUTO_OPEN_POSITIONS = int(
-    os.getenv("MAX_AUTO_OPEN_POSITIONS", "3")
-)
-
-MAX_TOTAL_RISK_PCT = float(
-    os.getenv("MAX_TOTAL_RISK_PCT", "6.5")
-)
-
-MAX_RISK_PCT_PER_TRADE = float(
-    os.getenv("MAX_RISK_PCT_PER_TRADE", "5.0")
-)
-
-MAX_LEVERAGE = float(
-    os.getenv("MAX_LEVERAGE", "20")
-)
-
-MAX_CLOSED_LOG = int(
-    os.getenv("MAX_CLOSED_LOG", "500")
-)
-
-MARGIN_RATE = 0.05
-
-# Primary strategy timeframe.
-BASE_TF_MIN = 15
-
-# Complete strategy cascade.
-STRATEGY_TIMEFRAMES = (
-    "4H",
-    "1H",
-    "15M",
-    "5M",
-    "1M",
-)
-
-
-WORKER_WATCHLIST: list[tuple[str, str]] = [
-    ("Gold (XAU)", "GC=F"),
-    ("Crude Oil (WTI)", "CL=F"),
-    ("EUR/USD", "EURUSD=X"),
-    ("GBP/USD", "GBPUSD=X"),
-    ("Bitcoin (BTC)", "BTC-USD"),
-]
-
-
-# FIX:
-# Instruments that can represent substantially similar USD exposure.
-CORRELATED_GROUPS: list[set[str]] = [
-    {
-        "EURUSD=X",
-        "GBPUSD=X",
-    }
-]
-
-
-OHLCV = [
-    "Open",
-    "High",
-    "Low",
-    "Close",
-    "Volume",
-]
-
-
-# FIX:
-# The worker now knows every timeframe used by the MTF cascade.
-_INTERVAL_MINUTES = {
-    "1m": 1,
-    "5m": 5,
-    "15m": 15,
-    "1h": 60,
-}
-
 
 # FIX: these are currently unused; _handle_stop is never registered via
 # signal.signal(), so Ctrl-C falls back to the default handler. Kept in
