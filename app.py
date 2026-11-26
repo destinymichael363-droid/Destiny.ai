@@ -903,15 +903,9 @@ def render_market_scanner() -> None:
         except Exception as exc:
             st.exception(exc)
 # ============================================================
-# MARKET SCANNER PAGE ROUTING
+# TRADING SIGNALS
 # ============================================================
 
-
-
-    render_trading_signals()
-# ============================================================
-# MARKET SCANNER PAGE ROUTING
-# ============================================================
 def render_trading_signals() -> None:
     """Display generated trading signals."""
 
