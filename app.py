@@ -819,7 +819,7 @@ def render_market_scanner() -> None:
 
     st.divider()
 
-               # --------------------------------------------------------
+                   # --------------------------------------------------------
     # RUN SCANNER
     # --------------------------------------------------------
 
@@ -849,7 +849,7 @@ def render_market_scanner() -> None:
                 "Market scan completed."
             )
 
-                        st.write(
+            st.write(
                 "DEBUG - Signals returned:",
                 len(
                     state.get(
@@ -865,7 +865,7 @@ def render_market_scanner() -> None:
                     state.keys()
                 ),
             )
-            
+
         except Exception as exc:
             log.exception(
                 "Manual market scan failed"
