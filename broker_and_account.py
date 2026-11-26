@@ -43,6 +43,17 @@ class VirtualAccount:
         risk_percent: float = 2.0,
         max_leverage: float = 20.0,
     ) -> tuple[bool, str]:
+        # FIX: validate max_leverage before using it. If max_leverage < 1
+        # then margin_required = notional / max_leverage would be LARGER
+        # than notional, which is nonsensical for a leveraged account.
+        if not (isinstance(max_leverage, (int, float)) and max_leverage >= 1.0):
+            return False, "max_leverage must be a number >= 1.0."
+
+        # FIX: validate risk_percent. A value <= 0 disables trading
+        # silently; a value > 100 risks more than the entire balance.
+        if not (isinstance(risk_percent, (int, float)) and 0 < risk_percent <= 100):
+            return False, "risk_percent must be between 0 (exclusive) and 100 (inclusive)."
+
         if entry_price <= 0 or stop_loss <= 0 or take_profit <= 0:
             return False, "Entry, Stop Loss, and Take Profit must all be positive."
 
@@ -108,6 +119,19 @@ class VirtualAccount:
         else:
             pnl = (pos.entry_price - exit_price) * pos.units
 
+        # NOTE: the max(0.0, ...) clamp below is a deliberate safety net.
+        # If a stop-loss is gapped through (e.g. weekend gap or thin 1m
+        # liquidity), the raw loss could exceed the posted margin. Without
+        # this clamp the account balance could go negative on that single
+        # trade. Clamping keeps the balance non-negative at the cost of
+        # silently absorbing any loss above the margin.
+        #
+        # NOTE: worker.py does NOT call this method — it uses its own
+        # close path in _evaluate_tp_sl_hits_for_users() which refunds
+        # `reserved` (not `margin_used`). Those are kept in sync by
+        # _stamp_new_positions(), so behavior is consistent as long as
+        # one of the two paths is used per position. Do not mix them
+        # for the same position.
         returned_cash = max(0.0, pos.margin_used + pnl)
         self.balance += returned_cash
         r_multiple = pnl / pos.risk_usd if pos.risk_usd > 0 else 0.0
@@ -129,7 +153,18 @@ class VirtualAccount:
         return True, f"Closed {pos.side} {pos.symbol} ({reason}) | P&L: {pnl:+.2f} USD ({r_multiple:+.2f}R)"
 
     def evaluate_tp_sl(self, symbol: str, candle_high: float, candle_low: float) -> list[str]:
-        """Checks open positions for `symbol` against latest candle High/Low and closes any hit."""
+        """
+        Checks open positions for `symbol` against latest candle High/Low and closes any hit.
+
+        NOTE: worker.py does NOT call this method. The worker uses its own
+        bar-by-bar evaluation (_evaluate_tp_sl_hits_for_users in worker.py)
+        because it needs to iterate every bar since the position opened,
+        not just the most recent one. This method is kept as a public API
+        for future UI use (e.g. a manual "check now" button).
+
+        If both SL and TP fall inside a single candle, SL is checked first
+        (conservative — assumes the stop was hit before the target).
+        """
         messages: list[str] = []
         for idx in range(len(self.positions) - 1, -1, -1):
             pos = self.positions[idx]
