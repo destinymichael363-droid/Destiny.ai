@@ -2456,7 +2456,16 @@ def _call_evaluate_setups_mtf(
         mtf_context=mtf_context,
         mtf_data=mtf_data,
     )
-
+    log.warning(
+        "STRATEGY DEBUG %s: 4H=%s 1H=%s 15M=%s 5M=%s 1M=%s result=%s",
+        symbol,
+        len(df_4h),
+        len(df_1h),
+        len(df_15m),
+        len(df_5m),
+        len(df_1m),
+        len(res) if res is not None else None,
+)
     return (
         list(res)
         if res is not None
