@@ -844,26 +844,17 @@ def render_market_scanner() -> None:
                 worker_module._scan_once(
                     state
                 )
-with st.spinner(
-    "Scanning markets..."
-):
-    worker_module._scan_once(
-        state
-    )
 
-st.write(
-    "DEBUG - Signals returned:",
-    len(
-        state.get(
-            "signals",
-            [],
-        )
-    ),
-)
+            st.write(
+                "DEBUG - Signals returned:",
+                len(
+                    state.get(
+                        "signals",
+                        [],
+                    )
+                ),
+            )
 
-st.success(
-    "Market scan completed."
-    )
             st.success(
                 "Market scan completed."
             )
@@ -877,7 +868,7 @@ st.success(
 
             st.error(
                 f"Market scan failed: {exc}"
-    )
+                    )
     # --------------------------------------------------------
     # STRATEGY ENGINE DIAGNOSTIC
     # --------------------------------------------------------
