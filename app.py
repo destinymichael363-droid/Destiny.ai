@@ -896,7 +896,119 @@ def render_settings() -> None:
         "Strategy constants live in config.py. "
         "Changes there affect both the worker and the UI after redeploy."
     )
+# ============================================================
+# SECTION 13: BACKTEST
+# ============================================================
 
+def render_backtest_page() -> None:
+    st.subheader("Backtest")
+
+    st.caption(
+        "Replay the strategy on historical data for one symbol. "
+        "Takes ~5–10 minutes per run on Streamlit Cloud."
+    )
+
+    try:
+        from backtest import run_backtest
+    except Exception as exc:
+        st.error(f"Backtest module not available: {exc}")
+        return
+
+    col1, col2, col3 = st.columns(3)
+
+    with col1:
+        symbol_display = st.selectbox(
+            "Symbol",
+            [name for name, _ in WATCHLIST],
+            key="bt_symbol",
+        )
+
+    with col2:
+        period = st.selectbox(
+            "Period (months)",
+            [3, 6, 12],
+            index=1,
+            key="bt_period",
+        )
+
+    with col3:
+        risk_pct = st.number_input(
+            "Risk % per trade",
+            min_value=0.5,
+            max_value=5.0,
+            value=2.0,
+            step=0.5,
+            key="bt_risk",
+        )
+
+    symbol = dict(WATCHLIST)[symbol_display]
+
+    if st.button("Run Backtest", use_container_width=True):
+        progress = st.progress(0)
+        status = st.empty()
+
+        def cb(i, total, msg):
+            progress.progress(min(100, int(i / max(total, 1) * 100)))
+            status.info(msg)
+
+        try:
+            with st.spinner("Running backtest..."):
+                result = run_backtest(
+                    symbol=symbol,
+                    period_months=period,
+                    risk_per_trade=risk_pct,
+                    progress_callback=cb,
+                )
+
+            progress.progress(100)
+            status.success(f"Done: {result.total_trades} trades")
+
+            st.divider()
+            st.subheader("Results")
+
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Total Trades", result.total_trades)
+            c2.metric("Win Rate", f"{result.win_rate:.1f}%")
+            c3.metric("Total R", f"{result.total_r:+.2f}")
+            c4.metric("Avg R", f"{result.avg_r:+.3f}")
+
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Wins", result.wins)
+            c2.metric("Losses", result.losses)
+            c3.metric("Profit Factor", f"{result.profit_factor:.2f}")
+            c4.metric("Max DD (R)", f"-{result.max_drawdown_r:.2f}")
+
+            c1, c2 = st.columns(2)
+            c1.metric("Start Balance", f"${result.starting_balance:,.2f}")
+            c2.metric("End Balance", f"${result.ending_balance:,.2f}")
+
+            if result.trades:
+                st.divider()
+                st.subheader("Trade Log")
+
+                rows = []
+                for t in result.trades:
+                    rows.append({
+                        "Entry time": str(t.entry_time),
+                        "Dir": t.direction,
+                        "Entry": f"{t.entry_price:.5g}",
+                        "SL": f"{t.sl:.5g}",
+                        "TP": f"{t.tp:.5g}",
+                        "Exit": f"{t.exit_price:.5g}",
+                        "Reason": t.exit_reason,
+                        "R": f"{t.r_multiple:+.2f}",
+                        "Bars": t.bars_held,
+                    })
+
+                st.dataframe(
+                    pd.DataFrame(rows),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+        except Exception as exc:
+            log.exception("Backtest failed")
+            st.error(f"Backtest failed: {exc}")
 
 # ============================================================
 # PAGE ROUTING
