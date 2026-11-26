@@ -819,11 +819,11 @@ def render_market_scanner() -> None:
 
     st.divider()
 
-           # --------------------------------------------------------
+               # --------------------------------------------------------
     # RUN SCANNER
     # --------------------------------------------------------
 
-        if st.button(
+    if st.button(
         "Run Scanner Now",
         use_container_width=True,
     ):
@@ -867,8 +867,6 @@ def render_market_scanner() -> None:
             st.error(
                 f"Market scan failed: {exc}"
             )
-    
-)
     # --------------------------------------------------------
     # STRATEGY ENGINE DIAGNOSTIC
     # --------------------------------------------------------
