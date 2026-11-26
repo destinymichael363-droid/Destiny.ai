@@ -49,32 +49,17 @@ DATA_DIR.mkdir(
 WORKER_STATE_PATH = DATA_DIR / "worker_state.json"
 
 # ============================================================
-# APPLICATION SETTINGS
+# SHARED CONFIG
 # ============================================================
 
-APP_NAME = "DESTINY AI"
-
-DEFAULT_BALANCE = 10000.0
-
-DEFAULT_RISK_PCT = 2.0
-
-DEFAULT_RR_TARGET = 5.0
-
-WATCHLIST = [
-    ("Gold (XAU)", "GC=F"),
-    ("Crude Oil (WTI)", "CL=F"),
-    ("EUR/USD", "EURUSD=X"),
-    ("GBP/USD", "GBPUSD=X"),
-    ("Bitcoin (BTC)", "BTC-USD"),
-]
-
-STRATEGY_TIMEFRAMES = [
-    "4H",
-    "1H",
-    "15M",
-    "5M",
-    "1M",
-]
+from config import (
+    APP_NAME,
+    WORKER_WATCHLIST as WATCHLIST,
+    STRATEGY_TIMEFRAMES,
+    DEFAULT_BALANCE,
+    DEFAULT_RISK_PCT,
+    DEFAULT_RR_TARGET,
+)
 
 # ============================================================
 # CORE PROJECT IMPORTS
@@ -85,46 +70,38 @@ try:
         authenticate_user,
         register_user,
     )
-
     AUTH_AVAILABLE = True
-
 except Exception:
-    log.exception(
-        "Authentication module import failed"
-    )
-
+    log.exception("Authentication module import failed")
     AUTH_AVAILABLE = False
 
 
 try:
     from broker_and_account import VirtualAccount
-
     ACCOUNT_AVAILABLE = True
-
 except Exception:
-    log.exception(
-        "Virtual account module import failed"
-    )
-
+    log.exception("Virtual account module import failed")
     ACCOUNT_AVAILABLE = False
 
 
 try:
     import worker as worker_module
-
     WORKER_AVAILABLE = True
-
 except Exception as exc:
-    log.exception(
-        "Worker module import failed"
-    )
-
+    log.exception("Worker module import failed")
     worker_module = None
     WORKER_AVAILABLE = False
+    st.error(f"Worker module import failed: {exc}")
 
-    st.error(
-        f"Worker module import failed: {exc}"
-    )
+
+try:
+    from data_loader import fetch_ohlcv
+    from chart_renderer import make_chart
+    CHART_AVAILABLE = True
+except Exception:
+    log.exception("Chart module import failed")
+    CHART_AVAILABLE = False
+
 
 # ============================================================
 # INITIAL SESSION STATE
@@ -144,249 +121,145 @@ SESSION_DEFAULTS = {
 for key, value in SESSION_DEFAULTS.items():
     if key not in st.session_state:
         st.session_state[key] = value
+
+
 # ============================================================
 # SECTION 2: AUTHENTICATION
 # ============================================================
 
 def _login_session_user(username: str) -> None:
     """Store the authenticated user's session."""
-
     st.session_state.authenticated = True
     st.session_state.username = username
     st.session_state.page = "Dashboard"
 
 
 def _logout_user() -> None:
-    """Log out the current user."""
-
+    """Log out the current user (password auth)."""
     st.session_state.authenticated = False
     st.session_state.username = ""
     st.session_state.page = "Dashboard"
-
     st.rerun()
 
 
+def _sync_google_user_to_supabase(email: str) -> str | None:
+    """
+    Ensure the Google-authenticated user exists in auth_users.
+    Returns username if found or created. None on failure.
+    """
+    try:
+        from auth_and_store import (
+            _supabase_enabled,
+            _sb_get_user,
+            _sb_upsert_user,
+        )
+
+        if not _supabase_enabled():
+            return email.split("@")[0].lower()
+
+        existing = _sb_get_user(email)
+        if existing:
+            return str(existing.get("username", email.split("@")[0].lower()))
+
+        clean_user = email.split("@")[0].lower()
+        suffix = 1
+        original = clean_user
+        while _sb_get_user(clean_user):
+            clean_user = f"{original}{suffix}"
+            suffix += 1
+
+        record = {
+            "username": clean_user,
+            "email": email.strip().lower(),
+            "salt": "",
+            "password_hash": "",
+            "failed_attempts": 0,
+            "locked_until": 0.0,
+            "created_at": int(time.time()),
+        }
+        if _sb_upsert_user(record):
+            log.info("Auto-created Google user: %s", clean_user)
+            return clean_user
+        return None
+    except Exception:
+        log.exception("Google user sync failed")
+        return None
+
+
 def authentication_screen() -> None:
-    """Display login and registration forms."""
+    """Google sign-in OR password login."""
 
     st.title("🎯 DESTINY AI")
-
-    st.caption(
-        "Intelligent Multi-Timeframe Trading Platform"
-    )
-
+    st.caption("Intelligent Multi-Timeframe Trading Platform")
     st.divider()
 
+    # ---- Google button (Streamlit native OIDC) ----
+    st.subheader("Sign in with Google")
+
+    if st.button("🔵 Continue with Google", use_container_width=True):
+        st.login()
+
+    st.caption("Recommended — uses your Google account.")
+    st.divider()
+
+    # ---- Password login (backup) ----
+    st.subheader("Or sign in with password")
+
     if not AUTH_AVAILABLE:
-        st.error(
-            "Authentication is unavailable. "
-            "Please check auth_and_store.py."
-        )
+        st.warning("Password login unavailable.")
         return
 
-    login_tab, register_tab = st.tabs(
-        [
-            "Login",
-            "Create Account",
-        ]
-    )
+    with st.form("destiny_password_login"):
+        ident = st.text_input("Username or Email", key="login_identity")
+        pw = st.text_input("Password", type="password", key="login_password")
+        submitted = st.form_submit_button("Login", use_container_width=True)
 
-    # --------------------------------------------------------
-    # LOGIN
-    # --------------------------------------------------------
+    if submitted:
+        if not ident.strip() or not pw:
+            st.warning("Enter username/email and password.")
+        else:
+            try:
+                res = authenticate_user(ident.strip(), pw)
+                if getattr(res, "ok", False) and getattr(res, "username", None):
+                    _login_session_user(str(res.username))
+                    st.rerun()
+                else:
+                    st.error(getattr(res, "message", "Login failed."))
+            except Exception:
+                log.exception("Password login failed")
+                st.error("Login failed. Check logs.")
 
-    with login_tab:
-
-        st.subheader("Welcome Back")
-
-        with st.form(
-            "destiny_login_form"
-        ):
-
-            ident = st.text_input(
-                "Username or Email",
-                key="login_identity",
-            )
-
-            pw = st.text_input(
-                "Password",
-                type="password",
-                key="login_password",
-            )
-
-            login_submit = st.form_submit_button(
-                "Login",
-                use_container_width=True,
-            )
-
-        if login_submit:
-
-            if not ident.strip() or not pw:
-                st.warning(
-                    "Enter your username/email and password."
-                )
-
-            else:
-                try:
-                    res = authenticate_user(
-                        ident.strip(),
-                        pw,
-                    )
-
-                    if (
-                        getattr(res, "ok", False)
-                        and getattr(res, "username", None)
-                    ):
-
-                        _login_session_user(
-                            str(res.username)
-                        )
-
-                        st.success(
-                            "Login successful."
-                        )
-
-                        st.rerun()
-
-                    else:
-                        st.error(
-                            str(
-                                getattr(
-                                    res,
-                                    "message",
-                                    "Login failed.",
-                                )
-                            )
-                        )
-
-                except Exception:
-                    log.exception(
-                        "Login failed"
-                    )
-
-                    st.error(
-                        "Login could not be completed. "
-                        "Check the application logs."
-                    )
-
-    # --------------------------------------------------------
-    # REGISTRATION
-    # --------------------------------------------------------
-
-    with register_tab:
-
-        st.subheader("Create Your Account")
-
-        with st.form(
-            "destiny_register_form"
-        ):
-
-            new_username = st.text_input(
-                "Username",
-                key="register_username",
-            )
-
-            new_email = st.text_input(
-                "Email Address",
-                key="register_email",
-            )
-
-            new_password = st.text_input(
-                "Password",
-                type="password",
-                key="register_password",
-            )
-
-            confirm_password = st.text_input(
-                "Confirm Password",
-                type="password",
-                key="register_confirm_password",
-            )
-
-            register_submit = st.form_submit_button(
-                "Create Account",
-                use_container_width=True,
-            )
-
-        if register_submit:
-
-            if not all(
-                [
-                    new_username.strip(),
-                    new_email.strip(),
-                    new_password,
-                    confirm_password,
-                ]
-            ):
-
-                st.warning(
-                    "Please complete all registration fields."
-                )
-
-            elif new_password != confirm_password:
-
-                st.error(
-                    "Passwords do not match."
-                )
-
-            else:
-
-                try:
-                    res = register_user(
-                        new_username.strip(),
-                        new_email.strip(),
-                        new_password,
-                    )
-
-                    if (
-                        getattr(res, "ok", False)
-                        and getattr(res, "username", None)
-                    ):
-
-                        _login_session_user(
-                            str(res.username)
-                        )
-
-                        st.success(
-                            "Account created successfully."
-                        )
-
-                        st.rerun()
-
-                    else:
-
-                        st.error(
-                            str(
-                                getattr(
-                                    res,
-                                    "message",
-                                    "Registration failed.",
-                                )
-                            )
-                        )
-
-                except Exception:
-                    log.exception(
-                        "Registration failed"
-                    )
-
-                    st.error(
-                        "Account registration could not be completed."
-                    )
+    st.divider()
+    st.caption("Don't have an account? Use Google sign-in above.")
 
 
 # ============================================================
-# AUTHENTICATION GATE
+# AUTH GATE
 # ============================================================
 
-if not st.session_state.get(
-    "authenticated",
-    False,
-):
+# Path 1: Google (Streamlit OIDC)
+if st.user.is_logged_in:
+    google_email = st.user.email
+    if not st.session_state.get("username"):
+        synced = _sync_google_user_to_supabase(google_email)
+        if synced is None:
+            st.error("Could not sync Google account. Try password login.")
+            st.stop()
+        st.session_state.username = synced
+        st.session_state.authenticated = True
+        st.session_state.page = "Dashboard"
+    # Authenticated — continue
 
+# Path 2: Password (existing session)
+elif st.session_state.get("authenticated", False):
+    pass  # Already logged in via password — continue
+
+# Path 3: Not authenticated — show login screen
+else:
     authentication_screen()
-
     st.stop()
+
+
 # ============================================================
 # SECTION 3: SIDEBAR NAVIGATION
 # ============================================================
@@ -394,6 +267,7 @@ if not st.session_state.get(
 PAGES = [
     "Dashboard",
     "Market Scanner",
+    "Chart",
     "Trading Signals",
     "Open Positions",
     "Trade History",
@@ -429,11 +303,11 @@ def render_sidebar() -> str:
         f"**Logged in as:** {st.session_state.username}"
     )
 
-    if st.sidebar.button(
-        "Logout",
-        use_container_width=True,
-    ):
-        _logout_user()
+    if st.sidebar.button("Logout", use_container_width=True):
+        if st.user.is_logged_in:
+            st.logout()
+        else:
+            _logout_user()
 
     return selected_page
 
@@ -452,6 +326,7 @@ st.caption(
 
 st.divider()
 
+
 # ============================================================
 # SECTION 4: DASHBOARD OVERVIEW
 # ============================================================
@@ -461,7 +336,6 @@ def render_dashboard() -> None:
 
     st.subheader("System Overview")
 
-    # SYSTEM STATUS
     col1, col2, col3 = st.columns(3)
 
     with col1:
@@ -484,7 +358,6 @@ def render_dashboard() -> None:
 
     st.divider()
 
-    # TRADING CONFIGURATION
     st.subheader("Trading Configuration")
 
     col1, col2, col3 = st.columns(3)
@@ -509,14 +382,10 @@ def render_dashboard() -> None:
 
     st.divider()
 
-    # WATCHLIST
     st.subheader("Market Watchlist")
 
     watchlist_data = [
-        {
-            "Instrument": name,
-            "Symbol": symbol,
-        }
+        {"Instrument": name, "Symbol": symbol}
         for name, symbol in WATCHLIST
     ]
 
@@ -528,7 +397,6 @@ def render_dashboard() -> None:
 
     st.divider()
 
-    # TIMEFRAME CASCADE
     st.subheader("Multi-Timeframe Strategy")
 
     timeframe_columns = st.columns(5)
@@ -547,13 +415,6 @@ def render_dashboard() -> None:
 
 
 # ============================================================
-# DASHBOARD PAGE ROUTING
-# ============================================================
-
-if current_page == "Dashboard":
-    render_dashboard()
-
-# ============================================================
 # SECTION 5: VIRTUAL ACCOUNT OVERVIEW
 # ============================================================
 
@@ -569,47 +430,25 @@ def render_account_overview() -> None:
     try:
         with worker_module._account_lock(username):
             acct, closed_log, prefs = (
-                worker_module._load_virtual_account_obj(
-                    username
-                )
+                worker_module._load_virtual_account_obj(username)
             )
 
-        balance = float(
-            getattr(acct, "balance", 0.0)
-        )
-
-        positions = list(
-            getattr(acct, "positions", []) or []
-        )
-
-        closed_trades = list(
-            closed_log or []
-        )
+        balance = float(getattr(acct, "balance", 0.0))
+        positions = list(getattr(acct, "positions", []) or [])
+        closed_trades = list(closed_log or [])
 
         col1, col2, col3 = st.columns(3)
 
         with col1:
-            st.metric(
-                "Account Balance",
-                f"${balance:,.2f}",
-            )
+            st.metric("Account Balance", f"${balance:,.2f}")
 
         with col2:
-            st.metric(
-                "Open Positions",
-                len(positions),
-            )
+            st.metric("Open Positions", len(positions))
 
         with col3:
-            st.metric(
-                "Closed Trades",
-                len(closed_trades),
-            )
+            st.metric("Closed Trades", len(closed_trades))
 
-        st.caption(
-            "Virtual account belonging to "
-            f"{username}"
-        )
+        st.caption(f"Virtual account belonging to {username}")
 
         st.divider()
 
@@ -626,18 +465,13 @@ def render_account_overview() -> None:
         with col2:
             st.metric(
                 "Automatic Execution",
-                (
-                    "Enabled"
-                    if prefs.get("auto_exec_virtual", True)
-                    else "Disabled"
-                ),
+                "Enabled" if prefs.get("auto_exec_virtual", True) else "Disabled",
             )
 
         st.markdown("**Open Positions**")
 
         if positions:
             position_rows = []
-
             for pos in positions:
                 position_rows.append({
                     "Symbol": getattr(pos, "symbol", ""),
@@ -657,25 +491,9 @@ def render_account_overview() -> None:
             st.info("There are currently no open positions.")
 
     except Exception:
-        log.exception(
-            "Could not load virtual account for %s",
-            username,
-        )
-        st.error(
-            "Unable to load your virtual account. "
-            "Check the application logs."
-        )
-            
+        log.exception("Could not load virtual account for %s", username)
+        st.error("Unable to load your virtual account.")
 
-    
-
-
-# ============================================================
-# ADD ACCOUNT OVERVIEW TO DASHBOARD
-# ============================================================
-
-if current_page == "Dashboard":
-    render_account_overview()
 
 # ============================================================
 # SECTION 6: MARKET SCANNER
@@ -687,223 +505,201 @@ def render_market_scanner() -> None:
     st.subheader("Market Scanner")
 
     if not WORKER_AVAILABLE:
-        st.error(
-            "Worker module is unavailable."
-        )
+        st.error("Worker module is unavailable.")
         return
 
     st.caption(
         "Live market scanning and multi-timeframe strategy status."
     )
 
-    # --------------------------------------------------------
-    # WORKER STATE
-    # --------------------------------------------------------
-
     state = {}
 
     try:
         if WORKER_STATE_PATH.exists():
-            with open(
-                WORKER_STATE_PATH,
-                "r",
-                encoding="utf-8",
-            ) as fh:
+            with open(WORKER_STATE_PATH, "r", encoding="utf-8") as fh:
                 state = json.load(fh)
+    except Exception:
+        log.exception("Could not load worker state.")
+        st.warning("Worker state could not be loaded.")
 
-    except Exception as exc:
-        log.exception(
-            "Could not load worker state."
-        )
-
-        st.warning(
-            "Worker state could not be loaded."
-        )
-
-    
-
-    
-
-    
-    # --------------------------------------------------------
-    # STATUS
-    # --------------------------------------------------------
-
-    status = state.get(
-        "status",
-        "unknown",
-    )
-
-    updated_utc = state.get(
-        "updated_utc",
-        "Never",
-    )
-
-    cycle_count = state.get(
-        "cycle_count",
-        0,
-    )
+    status = state.get("status", "unknown")
+    updated_utc = state.get("updated_utc", "Never")
+    cycle_count = state.get("cycle_count", 0)
 
     col1, col2, col3 = st.columns(3)
 
     with col1:
-        st.metric(
-            "Scanner Status",
-            str(status).upper(),
-        )
+        st.metric("Scanner Status", str(status).upper())
 
     with col2:
-        st.metric(
-            "Scan Cycles",
-            int(cycle_count),
-        )
+        st.metric("Scan Cycles", int(cycle_count))
 
     with col3:
-        st.metric(
-            "Last Update",
-            str(updated_utc),
-        )
+        st.metric("Last Update", str(updated_utc))
 
     st.divider()
 
-    # --------------------------------------------------------
-    # SCANNED ASSETS
-    # --------------------------------------------------------
-
     st.subheader("Scanned Instruments")
 
-    scanned = state.get(
-        "scanned_assets",
-        [],
-    )
+    scanned = state.get("scanned_assets", [])
 
     if scanned:
-        rows = []
-
-        for symbol in scanned:
-            rows.append(
-                {
-                    "Symbol": symbol,
-                    "Status": "Scanned",
-                }
-            )
-
+        rows = [{"Symbol": s, "Status": "Scanned"} for s in scanned]
         st.dataframe(
             pd.DataFrame(rows),
             use_container_width=True,
             hide_index=True,
         )
-
     else:
-        st.info(
-            "No instruments have been scanned yet."
-        )
+        st.info("No instruments have been scanned yet.")
 
     st.divider()
-
-    # --------------------------------------------------------
-    # WARNINGS
-    # --------------------------------------------------------
-
-    warnings = state.get(
-        "warnings",
-        [],
-    )
 
     st.subheader("Scanner Messages")
 
+    warnings = state.get("warnings", [])
+
     if warnings:
-        for warning in warnings:
-            st.warning(str(warning))
+        for w in warnings:
+            st.warning(str(w))
     else:
-        st.success(
-            "No scanner warnings reported."
-        )
+        st.success("No scanner warnings reported.")
 
     st.divider()
 
-                   # --------------------------------------------------------
-    # RUN SCANNER
-    # --------------------------------------------------------
-
-    if st.button(
-        "Run Scanner Now",
-        use_container_width=True,
-    ):
+    if st.button("Run Scanner Now", use_container_width=True):
         try:
             state = {}
 
             if WORKER_STATE_PATH.exists():
-                with open(
-                    WORKER_STATE_PATH,
-                    "r",
-                    encoding="utf-8",
-                ) as fh:
+                with open(WORKER_STATE_PATH, "r", encoding="utf-8") as fh:
                     state = json.load(fh)
 
-            with st.spinner(
-                "Scanning markets..."
-            ):
-                worker_module._scan_once(
-                    state
-                )
+            with st.spinner("Scanning markets..."):
+                worker_module._scan_once(state)
 
-            st.success(
-                "Market scan completed."
-            )
-
-            st.write(
-                "DEBUG - Signals returned:",
-                len(
-                    state.get(
-                        "signals",
-                        [],
-                    )
-                ),
-            )
-
-            st.write(
-                "DEBUG - Worker state keys:",
-                list(
-                    state.keys()
-                ),
-            )
+            st.success("Market scan completed.")
 
         except Exception as exc:
-            log.exception(
-                "Manual market scan failed"
-            )
+            log.exception("Manual market scan failed")
+            st.error(f"Market scan failed: {exc}")
 
-            st.error(
-                f"Market scan failed: {exc}"
-            )
-    # --------------------------------------------------------
-    # STRATEGY ENGINE DIAGNOSTIC
-    # --------------------------------------------------------
 
-    if (
-        WORKER_AVAILABLE
-        and getattr(
-            worker_module,
-            "_evaluate_setups",
-            None,
-        ) is None
-    ):
+# ============================================================
+# SECTION 7: CHART
+# ============================================================
+
+def render_chart_page() -> None:
+    """Display candlestick chart with S/R and OB+FVG overlays."""
+
+    st.subheader("Chart")
+
+    if not CHART_AVAILABLE:
         st.error(
-            "strategy_engine.py could not be loaded."
+            "Chart module unavailable. "
+            "Check data_loader.py and chart_renderer.py."
+        )
+        return
+
+    symbol_map = {name: sym for name, sym in WATCHLIST}
+
+    col1, col2, col3 = st.columns(3)
+
+    with col1:
+        display_name = st.selectbox(
+            "Symbol",
+            list(symbol_map.keys()),
+            key="chart_symbol",
         )
 
-        try:
-            import strategy_engine
+    with col2:
+        timeframe = st.selectbox(
+            "Timeframe",
+            ["15M", "1H", "4H"],
+            key="chart_tf",
+        )
 
-            st.success(
-                "strategy_engine.py loaded successfully."
+    with col3:
+        show_sr = st.checkbox("S/R", value=True, key="chart_show_sr")
+        show_ob = st.checkbox("OB+FVG", value=True, key="chart_show_ob")
+
+    symbol = symbol_map[display_name]
+
+    tf_config = {
+        "15M": dict(interval="15m", period="14d", resample=False),
+        "1H": dict(interval="1h", period="60d", resample=False),
+        "4H": dict(interval="1h", period="120d", resample=True),
+    }[timeframe]
+
+    try:
+        with st.spinner(f"Loading {display_name} {timeframe}..."):
+            df = fetch_ohlcv(
+                symbol,
+                interval=tf_config["interval"],
+                period=tf_config["period"],
+                resample_4h=tf_config["resample"],
             )
 
-        except Exception as exc:
-            st.exception(exc)
+        if df.empty:
+            st.error(
+                f"No data for {display_name} {timeframe}. "
+                "Try a different symbol or timeframe."
+            )
+            return
+
+        # Engines
+        sr_zones = []
+        paired_zones = []
+        sweep_series = None
+
+        try:
+            from sr_engine import run_sr_zones_engine
+            sr_result = run_sr_zones_engine(df, tf_label=timeframe)
+            sr_zones = sr_result.get("active_zones", [])
+        except Exception:
+            log.exception("S/R engine failed")
+
+        try:
+            from ob_fvg_engine import run_ob_fvg_engine
+            ob_result = run_ob_fvg_engine(
+                df,
+                timeframe_minutes={"15M": 15, "1H": 60, "4H": 240}[timeframe],
+            )
+            paired_zones = ob_result.get("active_zones", [])
+            sig_df = ob_result.get("signals_df")
+            if sig_df is not None and not sig_df.empty:
+                if "swept_liquidity_count" in sig_df.columns:
+                    sweep_series = sig_df["swept_liquidity_count"]
+        except Exception:
+            log.exception("OB/FVG engine failed")
+
+        fig = make_chart(
+            df=df,
+            symbol=display_name,
+            timeframe=timeframe,
+            sr_zones=sr_zones,
+            paired_zones=paired_zones,
+            sweep_series=sweep_series,
+            show_sr=show_sr,
+            show_ob_fvg=show_ob,
+            show_trade=False,
+        )
+
+        st.plotly_chart(fig, use_container_width=True)
+
+        st.caption(
+            f"{len(df)} candles · "
+            f"last: {df['Close'].iloc[-1]:.5g} · "
+            f"at {df.index[-1]}"
+        )
+
+    except Exception as exc:
+        log.exception("Chart rendering failed")
+        st.error(f"Chart failed: {exc}")
+
+
 # ============================================================
-# TRADING SIGNALS
+# SECTION 8: TRADING SIGNALS
 # ============================================================
 
 def render_trading_signals() -> None:
@@ -916,17 +712,10 @@ def render_trading_signals() -> None:
         return
 
     try:
-        with open(
-            WORKER_STATE_PATH,
-            "r",
-            encoding="utf-8",
-        ) as fh:
+        with open(WORKER_STATE_PATH, "r", encoding="utf-8") as fh:
             state = json.load(fh)
-
     except Exception as exc:
-        st.error(
-            f"Could not load trading signals: {exc}"
-        )
+        st.error(f"Could not load trading signals: {exc}")
         return
 
     signals = state.get("signals", [])
@@ -939,57 +728,201 @@ def render_trading_signals() -> None:
         return
 
     for signal in reversed(signals):
-
         with st.container(border=True):
-
-            st.markdown(
-                f"### {signal.get('symbol', 'Unknown')}"
-            )
+            st.markdown(f"### {signal.get('symbol', 'Unknown')}")
 
             col1, col2, col3 = st.columns(3)
-
-            col1.metric(
-                "Direction",
-                signal.get("direction", "N/A"),
-            )
-
-            col2.metric(
-                "Entry",
-                signal.get("entry", "N/A"),
-            )
-
-            col3.metric(
-                "Stop Loss",
-                signal.get("sl", "N/A"),
-            )
+            col1.metric("Direction", signal.get("direction", "N/A"))
+            col2.metric("Entry", signal.get("entry", "N/A"))
+            col3.metric("Stop Loss", signal.get("sl", "N/A"))
 
             col1, col2, col3 = st.columns(3)
-
-            col1.metric(
-                "Take Profit",
-                signal.get("tp", "N/A"),
-            )
-
-            col2.metric(
-                "Risk/Reward",
-                signal.get("rr", "N/A"),
-            )
-
-            col3.metric(
-                "Confidence",
-                signal.get("confidence", "N/A"),
-            )
+            col1.metric("Take Profit", signal.get("tp", "N/A"))
+            col2.metric("Risk/Reward", signal.get("rr", "N/A"))
+            col3.metric("Confidence", signal.get("confidence", "N/A"))
 
             st.write(
                 "Reason:",
                 signal.get("reason", "No explanation provided."),
             )
+
+
+# ============================================================
+# SECTION 9: OPEN POSITIONS
+# ============================================================
+
+def render_open_positions() -> None:
+    st.subheader("Open Positions")
+
+    if not WORKER_AVAILABLE:
+        st.warning("Worker module unavailable.")
+        return
+
+    username = st.session_state.username
+
+    try:
+        with worker_module._account_lock(username):
+            acct, closed_log, prefs = (
+                worker_module._load_virtual_account_obj(username)
+            )
+
+        positions = list(getattr(acct, "positions", []) or [])
+
+        if not positions:
+            st.info("No open positions.")
+            return
+
+        rows = []
+        for pos in positions:
+            rows.append({
+                "Symbol": getattr(pos, "symbol", ""),
+                "Side": getattr(pos, "side", ""),
+                "Entry": getattr(pos, "entry_price", 0.0),
+                "SL": getattr(pos, "stop_loss", 0.0),
+                "TP": getattr(pos, "take_profit", 0.0),
+                "Units": getattr(pos, "units", 0.0),
+                "Opened": getattr(pos, "opened_utc", ""),
+            })
+
+        st.dataframe(
+            pd.DataFrame(rows),
+            use_container_width=True,
+            hide_index=True,
+        )
+    except Exception:
+        log.exception("Could not load open positions")
+        st.error("Could not load open positions.")
+
+
+# ============================================================
+# SECTION 10: TRADE HISTORY
+# ============================================================
+
+def render_trade_history() -> None:
+    st.subheader("Trade History")
+
+    if not WORKER_AVAILABLE:
+        st.warning("Worker module unavailable.")
+        return
+
+    username = st.session_state.username
+
+    try:
+        with worker_module._account_lock(username):
+            acct, closed_log, prefs = (
+                worker_module._load_virtual_account_obj(username)
+            )
+
+        trades = list(closed_log or [])
+
+        if not trades:
+            st.info("No closed trades yet.")
+            return
+
+        rows = []
+        for t in trades:
+            rows.append({
+                "Symbol": t.get("symbol", ""),
+                "Side": t.get("side", ""),
+                "Entry": t.get("entry", 0.0),
+                "Exit": t.get("exit", 0.0),
+                "SL": t.get("sl", 0.0),
+                "TP": t.get("tp", 0.0),
+                "PnL": t.get("pnl", 0.0),
+                "Closed": t.get("closed_utc", ""),
+            })
+
+        st.dataframe(
+            pd.DataFrame(rows),
+            use_container_width=True,
+            hide_index=True,
+        )
+    except Exception:
+        log.exception("Could not load trade history")
+        st.error("Could not load trade history.")
+
+
+# ============================================================
+# SECTION 11: ACCOUNT
+# ============================================================
+
+def render_account_page() -> None:
+    st.subheader("Account")
+    st.caption(f"Signed in as: **{st.session_state.username}**")
+    st.divider()
+
+    if st.user.is_logged_in:
+        st.write("**Auth method:** Google")
+        st.write(f"**Email:** {st.user.email}")
+    else:
+        st.write("**Auth method:** Password")
+
+    st.divider()
+    render_account_overview()
+
+
+# ============================================================
+# SECTION 12: SETTINGS
+# ============================================================
+
+def render_settings() -> None:
+    st.subheader("Settings")
+
+    st.markdown("**Strategy settings (session only)**")
+
+    new_risk = st.slider(
+        "Risk per trade (%)",
+        min_value=0.5,
+        max_value=10.0,
+        value=float(st.session_state.risk_pct),
+        step=0.5,
+    )
+
+    new_rr = st.slider(
+        "Target Risk/Reward",
+        min_value=1.0,
+        max_value=10.0,
+        value=float(st.session_state.rr_target),
+        step=0.5,
+    )
+
+    if st.button("Save settings (session)", use_container_width=True):
+        st.session_state.risk_pct = new_risk
+        st.session_state.rr_target = new_rr
+        st.success("Settings updated.")
+
+    st.divider()
+    st.caption(
+        "Strategy constants live in config.py. "
+        "Changes there affect both the worker and the UI after redeploy."
+    )
+
+
 # ============================================================
 # PAGE ROUTING
 # ============================================================
 
-if current_page == "Market Scanner":
+if current_page == "Dashboard":
+    render_dashboard()
+    render_account_overview()
+
+elif current_page == "Market Scanner":
     render_market_scanner()
+
+elif current_page == "Chart":
+    render_chart_page()
 
 elif current_page == "Trading Signals":
     render_trading_signals()
+
+elif current_page == "Open Positions":
+    render_open_positions()
+
+elif current_page == "Trade History":
+    render_trade_history()
+
+elif current_page == "Account":
+    render_account_page()
+
+elif current_page == "Settings":
+    render_settings()
