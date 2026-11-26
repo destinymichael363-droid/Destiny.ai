@@ -1806,4 +1806,1249 @@ def _evaluate_tp_sl_hits_for_users(
                             not isinstance(refund, (int, float))
                             or refund <= 0
                         ):
-                            refund = rec.m
+                            refund = rec.margin_used
+
+                        acct.balance = round(
+                            float(
+                                acct.balance
+                            )
+                            + refund
+                            + pnl_val,
+                            2,
+                        )
+
+                    closed_log.append(
+                        {
+                            "symbol": rec.symbol,
+                            "side": rec.side,
+                            "entry": rec.entry_price,
+                            "exit": float(
+                                exit_px
+                            ),
+                            "sl": rec.stop_loss,
+                            "tp": rec.take_profit,
+                            "pnl": pnl_val,
+                            "closed_by": (
+                                "worker_tp_sl"
+                            ),
+                            "opened_utc": (
+                                rec.opened_utc
+                            ),
+                            "closed_utc": (
+                                _utc_iso()
+                            ),
+                        }
+                    )
+
+                    closed_count += 1
+
+                if closed_count > 0:
+                    acct.positions = remaining
+
+                    _save_virtual_account_obj(
+                        username,
+                        acct,
+                        closed_log,
+                        prefs=prefs,
+                    )
+
+                    total_closed += (
+                        closed_count
+                    )
+
+        except Exception:
+            log.exception(
+                "TP/SL evaluation failed for %s",
+                username,
+            )
+
+    return total_closed
+
+
+# --------------------------------------------------------------------------- #
+# Auto-execution
+# --------------------------------------------------------------------------- #
+def _try_auto_execute_for_users(
+    signal_item: dict,
+    usernames: list[str],
+    default_risk_pct: float = 2.0,
+) -> str:
+    if not usernames:
+        return (
+            "auto_ready_no_trader"
+        )
+
+    entry_px = _to_float(
+        signal_item.get("entry")
+    )
+
+    sl_px = _to_float(
+        signal_item.get("sl")
+    )
+
+    tp_px = _to_float(
+        signal_item.get("tp")
+    )
+
+    side = str(
+        signal_item.get(
+            "direction",
+            "",
+        )
+    ).upper()
+
+    symbol = str(
+        signal_item.get(
+            "symbol",
+            "",
+        )
+    ).strip()
+
+    if (
+        entry_px is None
+        or sl_px is None
+        or tp_px is None
+        or entry_px <= 0
+        or sl_px <= 0
+        or tp_px <= 0
+        or side not in (
+            "LONG",
+            "SHORT",
+        )
+        or not symbol
+        or not _levels_valid(
+            side,
+            entry_px,
+            sl_px,
+            tp_px,
+        )
+    ):
+        return (
+            "signal_only_invalid_levels"
+        )
+
+    executed_users: list[str] = []
+    blocked: list[str] = []
+
+    for username in usernames:
+        try:
+            with _account_lock(
+                username
+            ):
+                (
+                    acct,
+                    closed_log,
+                    prefs,
+                ) = _load_virtual_account_obj(
+                    username
+                )
+
+                if not bool(
+                    prefs.get(
+                        "auto_exec_virtual",
+                        True,
+                    )
+                ):
+                    continue
+
+                positions = list(
+                    getattr(
+                        acct,
+                        "positions",
+                        [],
+                    )
+                    or []
+                )
+
+                user_risk = (
+                    _to_float(
+                        prefs.get(
+                            "risk_pct"
+                        ),
+                        default_risk_pct,
+                    )
+                    or default_risk_pct
+                )
+
+                user_risk = min(
+                    max(
+                        user_risk,
+                        0.0,
+                    ),
+                    MAX_RISK_PCT_PER_TRADE,
+                )
+
+                balance = float(
+                    getattr(
+                        acct,
+                        "balance",
+                        0.0,
+                    )
+                )
+
+                reason = (
+                    _exposure_block_reason(
+                        positions,
+                        symbol,
+                        side,
+                        balance
+                        * user_risk
+                        / 100.0,
+                        balance,
+                    )
+                )
+
+                if reason:
+                    log.info(
+                        "skip %s %s %s for %s: %s",
+                        side,
+                        symbol,
+                        entry_px,
+                        username,
+                        reason,
+                    )
+
+                    blocked.append(
+                        reason
+                    )
+
+                    continue
+
+                ok, msg = (
+                    _open_via_virtual_account(
+                        acct,
+                        symbol,
+                        side,
+                        entry_px,
+                        sl_px,
+                        tp_px,
+                        risk_pct=user_risk,
+                    )
+                )
+
+                if ok:
+                    _save_virtual_account_obj(
+                        username,
+                        acct,
+                        closed_log,
+                        prefs=prefs,
+                    )
+
+                    executed_users.append(
+                        username
+                    )
+
+                else:
+                    log.info(
+                        "open rejected for %s on %s: %s",
+                        username,
+                        symbol,
+                        msg,
+                    )
+
+        except Exception:
+            log.exception(
+                "auto-execute failed for %s",
+                username,
+            )
+
+    if executed_users:
+        return (
+            "virtual_executed "
+            f"({', '.join(executed_users)})"
+        )
+
+    if blocked:
+        return (
+            "auto_blocked "
+            f"({', '.join(sorted(set(blocked)))})"
+        )
+
+    return (
+        "auto_armed_no_new_fill"
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Market data
+# --------------------------------------------------------------------------- #
+def _clean_ohlcv(
+    df: pd.DataFrame | None,
+    tail: int | None = 200,
+) -> pd.DataFrame:
+    if df is None or df.empty:
+        return pd.DataFrame(
+            columns=OHLCV
+        )
+
+    out = df.copy()
+
+    if isinstance(
+        out.columns,
+        pd.MultiIndex,
+    ):
+        out.columns = (
+            out.columns
+            .get_level_values(0)
+        )
+
+    if not all(
+        c in out.columns
+        for c in [
+            "Open",
+            "High",
+            "Low",
+            "Close",
+        ]
+    ):
+        return pd.DataFrame(
+            columns=OHLCV
+        )
+
+    if "Volume" not in out.columns:
+        out["Volume"] = 0.0
+
+    out = out[
+        OHLCV
+    ].copy()
+
+    for col in OHLCV:
+        out[col] = pd.to_numeric(
+            out[col],
+            errors="coerce",
+        )
+
+    out = out.dropna(
+        subset=[
+            "Open",
+            "High",
+            "Low",
+            "Close",
+        ]
+    ).sort_index()
+
+    return (
+        out.tail(tail)
+        if tail
+        else out
+    )
+
+
+def _drop_forming_bar(
+    df: pd.DataFrame,
+    bar_minutes: int,
+) -> pd.DataFrame:
+    """
+    Remove the current still-forming candle.
+
+    yfinance candle timestamps represent the candle start.
+    """
+    if (
+        df is None
+        or df.empty
+    ):
+        return df
+
+    last_ts = pd.Timestamp(
+        df.index[-1]
+    )
+
+    if last_ts.tzinfo is None:
+        last_ts = last_ts.tz_localize(
+            "UTC"
+        )
+
+    if (
+        last_ts
+        + pd.Timedelta(
+            minutes=bar_minutes
+        )
+        > pd.Timestamp(
+            _utc_now()
+        )
+    ):
+        return df.iloc[:-1]
+
+    return df
+
+
+def _resample_4h(
+    hourly: pd.DataFrame,
+) -> pd.DataFrame:
+    if (
+        hourly is None
+        or hourly.empty
+    ):
+        return pd.DataFrame(
+            columns=OHLCV
+        )
+
+    try:
+        res = hourly.resample(
+            "4h",
+            label="left",
+            closed="left",
+        ).agg(
+            {
+                "Open": "first",
+                "High": "max",
+                "Low": "min",
+                "Close": "last",
+                "Volume": "sum",
+            }
+        )
+
+        return _clean_ohlcv(
+            res
+        )
+
+    except Exception:
+        log.exception(
+            "4h resample failed"
+        )
+
+        return pd.DataFrame(
+            columns=OHLCV
+        )
+
+
+def _download_tf(
+    symbol: str,
+    interval: str,
+    period: str,
+    resample_4h: bool = False,
+    closed_only: bool = True,
+    tail: int | None = None,
+) -> pd.DataFrame:
+    """
+    Download OHLCV for one timeframe.
+
+    Important:
+    - 1M is limited to a short period because of provider limitations.
+    - 5M gets enough history for the lower-timeframe engine.
+    - 1H remains the source for 4H resampling.
+    """
+    if interval not in {
+        "1m",
+        "5m",
+        "15m",
+        "1h",
+    }:
+        raise ValueError(
+            f"unsupported interval: {interval}"
+        )
+
+    # Do not truncate hourly source data before 4H resampling.
+    if resample_4h:
+        keep = None
+    elif tail is not None:
+        keep = tail
+    else:
+        keep = 200
+
+    df = pd.DataFrame(
+        columns=OHLCV
+    )
+
+    try:
+        dl = yf.download(
+            tickers=symbol,
+            period=period,
+            interval=interval,
+            auto_adjust=False,
+            actions=False,
+            progress=False,
+            threads=False,
+        )
+
+        df = _clean_ohlcv(
+            dl,
+            tail=keep,
+        )
+
+    except Exception as exc:
+        log.warning(
+            "yf.download failed for %s %s: %s",
+            symbol,
+            interval,
+            exc,
+        )
+
+    if df.empty:
+        try:
+            raw = yf.Ticker(
+                symbol
+            ).history(
+                period=period,
+                interval=interval,
+                auto_adjust=False,
+                actions=False,
+            )
+
+            df = _clean_ohlcv(
+                raw,
+                tail=keep,
+            )
+
+        except Exception as exc:
+            log.warning(
+                "yf history fallback failed for %s %s: %s",
+                symbol,
+                interval,
+                exc,
+            )
+
+    if df.empty:
+        return df
+
+    bar_min = _INTERVAL_MINUTES.get(
+        interval,
+        0,
+    )
+
+    if (
+        closed_only
+        and bar_min
+    ):
+        df = _drop_forming_bar(
+            df,
+            bar_min,
+        )
+
+    if resample_4h:
+        df = _resample_4h(
+            df
+        )
+
+        if (
+            closed_only
+            and not df.empty
+        ):
+            df = _drop_forming_bar(
+                df,
+                240,
+            )
+
+    return df
+
+
+# --------------------------------------------------------------------------- #
+# Worker state
+# --------------------------------------------------------------------------- #
+def _load_existing_state() -> dict:
+    if STATE_PATH.exists():
+        try:
+            data = json.loads(
+                STATE_PATH.read_text(
+                    encoding="utf-8"
+                )
+            )
+
+            if isinstance(
+                data,
+                dict,
+            ):
+                data.setdefault(
+                    "signals",
+                    [],
+                )
+
+                data.setdefault(
+                    "seen_keys",
+                    [],
+                )
+
+                data.setdefault(
+                    "last_bar",
+                    {},
+                )
+
+                return data
+
+        except Exception:
+            log.warning(
+                "could not read %s",
+                STATE_PATH,
+                exc_info=True,
+            )
+
+    remote = (
+        _supabase_load_worker_state()
+    )
+
+    if isinstance(
+        remote,
+        dict,
+    ):
+        remote.setdefault(
+            "signals",
+            [],
+        )
+
+        remote.setdefault(
+            "seen_keys",
+            [],
+        )
+
+        remote.setdefault(
+            "last_bar",
+            {},
+        )
+
+        return remote
+
+    return {
+        "status": "starting",
+        "updated_utc": _utc_now_str(),
+        "cycle_count": 0,
+        "scanned_assets": [],
+        "signals": [],
+        "seen_keys": [],
+        "last_bar": {},
+    }
+
+
+def _write_state_atomic(
+    state: dict,
+) -> None:
+    STATE_PATH.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    tmp_path = (
+        STATE_PATH.with_suffix(
+            ".json.tmp"
+        )
+    )
+
+    tmp_path.write_text(
+        json.dumps(
+            state,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    os.replace(
+        tmp_path,
+        STATE_PATH,
+    )
+
+    _supabase_save_worker_state(
+        state
+    )
+
+
+def _call_evaluate_setups_mtf(
+    df_15m: pd.DataFrame,
+    df_1h: pd.DataFrame,
+    df_4h: pd.DataFrame,
+    df_5m: pd.DataFrame,
+    df_1m: pd.DataFrame,
+    symbol: str,
+    sr_out: dict,
+    ob_out: dict,
+    mtf_context: dict,
+    rr_target: float = 5.0,
+) -> list:
+    """
+    Pass the COMPLETE five-timeframe dataset into strategy_engine.
+
+    This is the critical connection:
+
+        4H
+        1H
+        15M
+        5M
+        1M
+
+    -> strategy_engine
+    -> mtf_runner
+    -> validated TradeSetup
+    """
+
+    if (
+        _evaluate_setups is None
+        or df_15m.empty
+    ):
+        return []
+
+    mtf_data = {
+        "4H": df_4h,
+        "1H": df_1h,
+        "15M": df_15m,
+        "5M": df_5m,
+        "1M": df_1m,
+    }
+
+    # Preserve any additional context supplied by MTF hooks.
+    for key, value in (
+        mtf_context or {}
+    ).items():
+        if (
+            key not in mtf_data
+            and isinstance(
+                value,
+                pd.DataFrame,
+            )
+        ):
+            mtf_data[key] = value
+
+    res = _call_filtered(
+        _evaluate_setups,
+        df=df_15m,
+        symbol=symbol,
+        tf_label="15M",
+        sr_out=sr_out,
+        ob_out=ob_out,
+        rr_target=rr_target,
+        df_1h=df_1h,
+        df_4h=df_4h,
+        mtf_context=mtf_context,
+        mtf_data=mtf_data,
+    )
+
+    return (
+        list(res)
+        if res is not None
+        else []
+    )
+
+
+def _scan_once(
+    state: dict,
+    risk_pct: float = 2.0,
+    target_users: list[str] | None = None,
+    force: bool = False,
+) -> dict:
+    signals: list[dict] = list(
+        state.get(
+            "signals"
+        )
+        or []
+    )
+
+    seen_keys: list[str] = list(
+        state.get(
+            "seen_keys"
+        )
+        or []
+    )
+
+    seen_set = set(
+        seen_keys
+    )
+
+    last_bar: dict[str, str] = dict(
+        state.get(
+            "last_bar"
+        )
+        or {}
+    )
+
+    scanned: list[str] = []
+    warnings: list[str] = []
+
+    # 15M data is retained for virtual TP/SL monitoring.
+    price_bars: dict[
+        str,
+        pd.DataFrame,
+    ] = {}
+
+    users_to_process = (
+        target_users
+        if target_users is not None
+        else _discover_trader_usernames()
+    )
+
+    if _evaluate_setups is None:
+        warnings.append(
+            "strategy_engine unavailable - "
+            "no signals are being produced"
+        )
+
+    for (
+        asset_name,
+        symbol,
+    ) in WORKER_WATCHLIST:
+
+        try:
+            # =========================================================
+            # 15M
+            # =========================================================
+            #
+            # Full 15M data is retained for TP/SL monitoring.
+            #
+            df_15m_full = _download_tf(
+                symbol,
+                interval="15m",
+                period="14d",
+                closed_only=False,
+            )
+
+            if df_15m_full.empty:
+                warnings.append(
+                    f"{symbol}: no 15m data"
+                )
+                continue
+
+            price_bars[
+                symbol
+            ] = df_15m_full
+
+            # Signals use CLOSED candles only.
+            df_15m = _drop_forming_bar(
+                df_15m_full,
+                BASE_TF_MIN,
+            )
+
+            if df_15m.empty:
+                continue
+
+            bar_ts = str(
+                df_15m.index[-1]
+            )
+
+            scanned.append(
+                f"{symbol}@{bar_ts}"
+            )
+
+            if _evaluate_setups is None:
+                continue
+
+            # Avoid reprocessing the same closed 15M candle.
+            if (
+                not force
+                and last_bar.get(
+                    symbol
+                )
+                == bar_ts
+            ):
+                continue
+
+            # =========================================================
+            # 1H
+            # =========================================================
+            df_1h = _download_tf(
+                symbol,
+                interval="1h",
+                period="60d",
+                closed_only=True,
+            )
+
+            if df_1h.empty:
+                warnings.append(
+                    f"{symbol}: no 1h data"
+                )
+                continue
+
+            # =========================================================
+            # 4H
+            # =========================================================
+            #
+            # Build 4H from the 1H source instead of independently
+            # downloading a different candle stream.
+            #
+            df_4h = _download_tf(
+                symbol,
+                interval="1h",
+                period="120d",
+                resample_4h=True,
+                closed_only=True,
+            )
+
+            if df_4h.empty:
+                warnings.append(
+                    f"{symbol}: no 4h data"
+                )
+                continue
+
+            # =========================================================
+            # 5M
+            # =========================================================
+            df_5m = _download_tf(
+                symbol,
+                interval="5m",
+                period="60d",
+                closed_only=True,
+            )
+
+            if df_5m.empty:
+                warnings.append(
+                    f"{symbol}: no 5m data"
+                )
+                continue
+
+            # =========================================================
+            # 1M
+            # =========================================================
+            #
+            # 1M is explicitly downloaded for precision execution.
+            #
+            # Provider limitations mean we intentionally use a short
+            # history here. The strategy only needs recent 1M execution
+            # context.
+            #
+            df_1m = _download_tf(
+                symbol,
+                interval="1m",
+                period="7d",
+                closed_only=True,
+            )
+
+            if df_1m.empty:
+                warnings.append(
+                    f"{symbol}: no 1m data"
+                )
+                continue
+
+            # =========================================================
+            # Validate the complete cascade before running strategy
+            # =========================================================
+            required_frames = {
+                "4H": df_4h,
+                "1H": df_1h,
+                "15M": df_15m,
+                "5M": df_5m,
+                "1M": df_1m,
+            }
+
+            missing = [
+                tf
+                for tf, frame
+                in required_frames.items()
+                if frame is None
+                or frame.empty
+            ]
+
+            if missing:
+                warnings.append(
+                    f"{symbol}: missing MTF data "
+                    f"({', '.join(missing)})"
+                )
+                continue
+
+            # =========================================================
+            # Existing 15M engines
+            # =========================================================
+            #
+            # These remain here for compatibility with the existing
+            # application architecture and diagnostic state.
+            #
+            try:
+                sr_out = (
+                    run_sr_zones_engine(
+                        df_15m,
+                        tf_label="15M",
+                        invalidation_mode="Wick",
+                    )
+                )
+
+            except Exception as exc:
+                log.exception(
+                    "sr engine failed for %s",
+                    symbol,
+                )
+
+                warnings.append(
+                    f"{symbol}: sr engine: {exc}"
+                )
+
+                sr_out = {
+                    "active_zones": [],
+                    "minor_zones": [],
+                }
+
+            try:
+                ob_out = (
+                    run_ob_fvg_engine(
+                        df_15m,
+                        timeframe_minutes=15,
+                    )
+                )
+
+            except Exception as exc:
+                log.exception(
+                    "ob/fvg engine failed for %s",
+                    symbol,
+                )
+
+                warnings.append(
+                    f"{symbol}: ob/fvg engine: {exc}"
+                )
+
+                ob_out = {}
+
+            # =========================================================
+            # MTF context
+            # =========================================================
+            mtf_context: dict = {
+                "4H": df_4h,
+                "1H": df_1h,
+                "15M": df_15m,
+                "5M": df_5m,
+                "1M": df_1m,
+            }
+
+            # Preserve optional MTF hooks if another version of
+            # mtf_runner provides them.
+            if _mtf_runner is not None:
+                for hook_name in (
+                    "build_mtf_context",
+                    "get_mtf_context",
+                    "enrich_chart_context",
+                ):
+                    fn = getattr(
+                        _mtf_runner,
+                        hook_name,
+                        None,
+                    )
+
+                    if not callable(fn):
+                        continue
+
+                    try:
+                        out = _call_filtered(
+                            fn,
+                            symbol=symbol,
+                            tf_label="15M",
+                            df=df_15m,
+                            df_1h=df_1h,
+                            df_4h=df_4h,
+                            df_5m=df_5m,
+                            df_1m=df_1m,
+                            sr_out=sr_out,
+                            ob_out=ob_out,
+                            mtf_data={
+                                "4H": df_4h,
+                                "1H": df_1h,
+                                "15M": df_15m,
+                                "5M": df_5m,
+                                "1M": df_1m,
+                            },
+                        )
+
+                    except Exception as exc:
+                        log.exception(
+                            "mtf hook %s failed for %s",
+                            hook_name,
+                            symbol,
+                        )
+
+                        warnings.append(
+                            f"{symbol}: "
+                            f"mtf hook {hook_name}: "
+                            f"{exc}"
+                        )
+
+                        break
+
+                    if isinstance(
+                        out,
+                        dict,
+                    ):
+                        sr_out = out.get(
+                            "sr_out",
+                            sr_out,
+                        )
+
+                        ob_out = out.get(
+                            "ob_out",
+                            ob_out,
+                        )
+
+                        # Do not overwrite the actual timeframe
+                        # DataFrames accidentally.
+                        for key, value in out.items():
+                            if key not in {
+                                "4H",
+                                "1H",
+                                "15M",
+                                "5M",
+                                "1M",
+                            }:
+                                mtf_context[
+                                    key
+                                ] = value
+
+                    break
+
+            # =========================================================
+            # AUTHORITATIVE STRATEGY CALL
+            # =========================================================
+            #
+            # The strategy engine now owns the complete MTF decision:
+            #
+            # 4H -> 1H -> 15M -> 5M -> 1M
+            #
+            setups = (
+                _call_evaluate_setups_mtf(
+                    df_15m=df_15m,
+                    df_1h=df_1h,
+                    df_4h=df_4h,
+                    df_5m=df_5m,
+                    df_1m=df_1m,
+                    symbol=symbol,
+                    sr_out=sr_out,
+                    ob_out=ob_out,
+                    mtf_context=mtf_context,
+                    rr_target=5.0,
+                )
+            )
+
+            # =========================================================
+            # Signal handling
+            # =========================================================
+            for s in setups:
+                direction = str(
+                    _get_val(
+                        s,
+                        ("direction",),
+                        "SIGNAL",
+                    )
+                )
+
+                conf = str(
+                    _get_val(
+                        s,
+                        ("confidence",),
+                        "4H/1H/15M",
+                    )
+                )
+
+                entry = _num_or_str(
+                    _get_val(
+                        s,
+                        ("entry",),
+                        "n/a",
+                    )
+                )
+
+                sl = _num_or_str(
+                    _get_val(
+                        s,
+                        ("sl",),
+                        "n/a",
+                    )
+                )
+
+                tp = _num_or_str(
+                    _get_val(
+                        s,
+                        ("tp",),
+                        "n/a",
+                    )
+                )
+
+                rr = _num_or_str(
+                    _get_val(
+                        s,
+                        ("rr",),
+                        5.0,
+                    )
+                )
+
+                # Include the complete MTF strategy context in the
+                # signal record so later auditing can tell exactly
+                # what generated the setup.
+                reason = str(
+                    _get_val(
+                        s,
+                        ("reason",),
+                        "MTF cascade validated",
+                    )
+                )
+
+                dedupe_key = (
+                    f"{symbol}"
+                    f"|15M"
+                    f"|{direction}"
+                    f"|{bar_ts}"
+                    f"|{entry}"
+                )
+
+                if dedupe_key in seen_set:
+                    continue
+
+                seen_set.add(
+                    dedupe_key
+                )
+
+                seen_keys.append(
+                    dedupe_key
+                )
+
+                sig_item = {
+                    "asset": asset_name,
+                    "symbol": symbol,
+                    "direction": direction,
+                    "confidence": conf,
+                    "entry": entry,
+                    "sl": sl,
+                    "tp": tp,
+                    "rr": rr,
+                    "reason": reason,
+                    "bar_time": bar_ts,
+                    "logged_utc": _utc_now_str(),
+                    "execution_status": "auto_armed",
+                    "strategy_timeframes": list(
+                        STRATEGY_TIMEFRAMES
+                    ),
+                }
+
+                sig_item[
+                    "execution_status"
+                ] = _try_auto_execute_for_users(
+                    sig_item,
+                    usernames=users_to_process,
+                    default_risk_pct=risk_pct,
+                )
+
+                signals.append(
+                    sig_item
+                )
+
+            # Only mark the bar processed after the entire strategy
+            # evaluation completed successfully.
+            last_bar[
+                symbol
+            ] = bar_ts
+
+        except Exception as exc:
+            # One instrument cannot kill the entire scanner.
+            log.exception(
+                "scan failed for %s: %s",
+                symbol,
+                exc,
+            )
+
+            warnings.append(
+                f"{symbol}: scan failed: {exc}"
+            )
+
+            continue
+
+    state.update(
+        {
+            "status": "running",
+            "updated_utc": _utc_now_str(),
+            "cycle_count": int(
+                state.get("cycle_count", 0)
+            ) + 1,
+            "scanned_assets": scanned,
+            "signals": signals[-MAX_SIGNALS:],
+            "seen_keys": seen_keys[-2000:],
+            "last_bar": last_bar,
+            "warnings": warnings,
+        }
+    )
+
+    _evaluate_tp_sl_hits_for_users(
+        price_bars,
+        users_to_process,
+    )
+
+    _write_state_atomic(state)
+
+    return state
