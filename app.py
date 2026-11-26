@@ -823,7 +823,7 @@ def render_market_scanner() -> None:
     # RUN SCANNER
     # --------------------------------------------------------
 
-    if st.button(
+        if st.button(
         "Run Scanner Now",
         use_container_width=True,
     ):
@@ -845,6 +845,10 @@ def render_market_scanner() -> None:
                     state
                 )
 
+            st.success(
+                "Market scan completed."
+            )
+
             st.write(
                 "DEBUG - Signals returned:",
                 len(
@@ -855,18 +859,15 @@ def render_market_scanner() -> None:
                 ),
             )
 
-            st.success(
-    "Market scan completed."
-)
+        except Exception as exc:
+            log.exception(
+                "Manual market scan failed"
+            )
 
-st.write(
-    "DEBUG - Signals returned:",
-    len(
-        state.get(
-            "signals",
-            [],
-        )
-    ),
+            st.error(
+                f"Market scan failed: {exc}"
+            )
+    
 )
     # --------------------------------------------------------
     # STRATEGY ENGINE DIAGNOSTIC
