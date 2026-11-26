@@ -479,7 +479,18 @@ def evaluate_setups(
         rr_target=rr_target,
     )
 
-    if setup is None:
+        if setup is None:
+        print(
+            "SETUP DEBUG:",
+            "scalp_signal=",
+            cascade.get("scalp_signal"),
+            "primary_valid=",
+            cascade.get("primary_setup", {}).get("valid"),
+            "execution=",
+            cascade.get("execution_confirmation"),
+            "htf_bias=",
+            cascade.get("htf_bias"),
+        )
         return []
 
     return [setup]
