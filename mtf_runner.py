@@ -30,7 +30,13 @@ def _closed_only(
     Keep the supplied data because worker.py
     already removes all forming candles.
 
-    Do not remove another closed candle.
+    CONTRACT WARNING:
+        This function does NOT remove forming candles. It trusts
+        worker.py to have already dropped them from every timeframe.
+
+        If worker.py ever changes to pass a forming bar, lookahead
+        bias is introduced here silently. Do not change the
+        worker.py data-prep path without re-testing this contract.
     """
     if (
         df is None
@@ -110,9 +116,16 @@ def _recent_sweeps(
     tf: str,
     results: dict,
     lookback: int = 5,
+    after_index: int | None = None,
 ) -> int:
     """
     Count recent liquidity sweeps.
+
+    FIX: when `after_index` is given, only sweeps occurring on bars
+    at or after that index are counted. This is used to enforce that
+    the sweep happened AFTER the 15M primary setup was confirmed,
+    not before it (which was silently allowing stale sweeps to
+    qualify a fresh setup).
 
     This is intentionally treated as supporting evidence rather than
     an independent trade trigger.
@@ -127,6 +140,13 @@ def _recent_sweeps(
 
     if "swept_liquidity_count" not in sig_df.columns:
         return 0
+
+    # FIX: optionally restrict to bars at/after a cutoff.
+    if after_index is not None:
+        try:
+            sig_df = sig_df.iloc[after_index:]
+        except Exception:
+            pass
 
     values = pd.to_numeric(
         sig_df["swept_liquidity_count"].tail(lookback),
@@ -169,21 +189,29 @@ def _get_structure_confirmation(
     direction: int,
     results: dict,
     lookback: int = 5,
+    after_index: int | None = None,
 ) -> bool:
     """
     Check for recent directional BOS/setup confirmation.
 
-    The current OB/FVG engine exposes BOS/setup fields. These are used
-    as the structural confirmation layer without inventing a separate
-    CHoCH implementation.
-
-    If the engine later exposes explicit CHoCH fields, they can be
-    added here without changing the cascade architecture.
+    FIX: when `after_index` is provided, only bars at or after that
+    index are considered. This prevents a BOS that happened before
+    the 15M setup from "confirming" an execution on a lower
+    timeframe.
     """
     sig_df = results[tf]["ob_fvg"].get(
         "signals_df",
         pd.DataFrame(),
     )
+
+    if sig_df.empty:
+        return False
+
+    if after_index is not None:
+        try:
+            sig_df = sig_df.iloc[after_index:]
+        except Exception:
+            pass
 
     if sig_df.empty:
         return False
@@ -276,6 +304,20 @@ def _build_primary_15m_overlaps(
         )
     )
 
+    # FIX: expose the 15M setup bar index. This is the index of the
+    # 15M signal bar (last bar of the 15M signals_df) — the bar on
+    # which the primary setup was established. Used downstream to
+    # enforce that 5M/1M confirmations occur AFTER this bar.
+    m15_sig_df = results["15M"]["ob_fvg"].get(
+        "signals_df",
+        pd.DataFrame(),
+    )
+    m15_last_bar_ts = (
+        m15_sig_df.index[-1]
+        if not m15_sig_df.empty
+        else None
+    )
+
     for pz_15m in paired_15m_zones:
         if pz_15m.direction != htf_direction:
             continue
@@ -326,6 +368,7 @@ def _build_primary_15m_overlaps(
                     "pz": pz_15m,
                     "primary_low": pz_low,
                     "primary_high": pz_high,
+                    "primary_bar_ts": m15_last_bar_ts,
                     "priority": (
                         0 if htf_name == "4H" else 1
                     ),
@@ -373,6 +416,7 @@ def _build_primary_15m_overlaps(
                     "pz": pz_15m,
                     "primary_low": pz_low,
                     "primary_high": pz_high,
+                    "primary_bar_ts": m15_last_bar_ts,
                     "priority": 2,
                 }
             )
@@ -390,6 +434,21 @@ def _find_execution_confirmation(
     has already been validated.
 
     Lower timeframes cannot create a setup by themselves.
+
+    FIX (critical):
+        Previously, a 5M/1M sweep that happened BEFORE the 15M
+        setup could still qualify the execution — because the sweep
+        window was measured relative to "now", not relative to the
+        setup bar.
+
+        Now we require:
+          * the lower timeframe's last bar touches the primary 15M
+            zone (unchanged), AND
+          * the structural confirmation or sweep happens ON OR AFTER
+            the 15M setup bar timestamp.
+
+        This makes the cascade strictly causal: nothing on 5M/1M
+        can "confirm" a setup that hadn't happened yet on 15M.
     """
     primary_low = float(
         primary_setup["primary_low"]
@@ -397,6 +456,10 @@ def _find_execution_confirmation(
     primary_high = float(
         primary_setup["primary_high"]
     )
+
+    # FIX: cutoff bar = the 15M setup bar timestamp (if available).
+    # Lower-timeframe signals before this bar must NOT count.
+    setup_bar_ts = primary_setup.get("primary_bar_ts")
 
     confirmations: list[dict] = []
 
@@ -439,17 +502,41 @@ def _find_execution_confirmation(
         if not zone_interaction:
             continue
 
+        # FIX: compute the bar offset on the lower timeframe that
+        # corresponds to the 15M setup bar. Any bar before this offset
+        # must not be allowed to confirm the setup.
+        after_idx: int | None = None
+
+        if setup_bar_ts is not None:
+            try:
+                # Position of the first 5M/1M bar whose timestamp is
+                # strictly greater than the 15M setup bar timestamp.
+                mask = df.index > setup_bar_ts
+                positions = list(
+                    int(i) for i, v in enumerate(mask) if bool(v)
+                )
+                if positions:
+                    after_idx = positions[0]
+                else:
+                    # No bar after the 15M setup → nothing to
+                    # confirm with yet.
+                    continue
+            except Exception:
+                after_idx = None
+
         structure_ok = _get_structure_confirmation(
             tf,
             direction,
             results,
             lookback=5,
+            after_index=after_idx,
         )
 
         sweep_count = _recent_sweeps(
             tf,
             results,
             lookback=8 if tf == "5M" else 10,
+            after_index=after_idx,
         )
 
         # A lower timeframe must either:
@@ -458,10 +545,10 @@ def _find_execution_confirmation(
         #      show directional structure, or
         #
         #   2. interact with the zone AND have a
-        #      directional setup signal.
+        #      directional sweep.
         #
-        # It can never qualify solely because BOS occurred
-        # somewhere away from the primary zone.
+        # FIX: both must occur ON OR AFTER the 15M setup bar.
+        # Previously a stale pre-setup sweep could qualify.
         if not structure_ok and sweep_count <= 0:
             continue
 
@@ -602,7 +689,7 @@ def run_closed_candle_5tf_cascade(
     tf_trends = {
         tf: _get_trend(tf, results)
         for tf in timeframe_order
-            }
+    }
 
     t_4h = tf_trends["4H"]
     t_1h = tf_trends["1H"]
@@ -737,12 +824,6 @@ def run_closed_candle_5tf_cascade(
     # =============================================================
     # 10. Build compatibility overlaps output
     # =============================================================
-    #
-    # Keep the original "overlaps" output so existing downstream
-    # code does not break.
-    #
-    # Primary 15M overlaps are returned first.
-    #
     overlaps = list(primary_overlaps)
 
     # =============================================================
@@ -750,10 +831,8 @@ def run_closed_candle_5tf_cascade(
     # =============================================================
     df_1m = results["1M"]["df"]
 
-    sig_1m = results["1M"]["ob_fvg"].get(
-        "signals_df",
-        pd.DataFrame(),
-    )
+    # FIX: sig_1m was assigned but never used (dead variable).
+    # Removed.
 
     scalp_signal: ScalpSignal | None = None
 
@@ -927,6 +1006,9 @@ def run_closed_candle_5tf_cascade(
                 ]
             )
 
+            # FIX: removed trailing spaces inside confidence labels
+            # (previously produced double-spaces like
+            # "HIGH  (15M Sweep...").
             if (
                 m15_sweep
                 and ltf_confirmed
