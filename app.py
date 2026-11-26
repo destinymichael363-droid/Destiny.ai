@@ -921,21 +921,11 @@ elif current_page == "Open Positions":
 elif current_page == "Trade History":
     render_trade_history()
 
+elif current_page == "Backtest":
+    render_backtest_page()
+
 elif current_page == "Account":
     render_account_page()
 
 elif current_page == "Settings":
     render_settings()
-PAGES = [
-    "Dashboard",
-    "Market Scanner",
-    "Chart",
-    "Trading Signals",
-    "Open Positions",
-    "Trade History",
-    "Backtest",          # ← add
-    "Account",
-    "Settings",
-    ]
-elif current_page == "Backtest":
-    render_backtest_page()
