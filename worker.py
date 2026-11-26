@@ -2416,10 +2416,18 @@ def _call_evaluate_setups_mtf(
     -> mtf_runner
     -> validated TradeSetup
     """
-    if (
-        _evaluate_setups is None
-        or df_15m.empty
-    ):
+        if _evaluate_setups is None:
+        log.warning(
+            "STRATEGY DEBUG %s: evaluate_setups is NOT loaded",
+            symbol,
+        )
+        return []
+
+    if df_15m.empty:
+        log.warning(
+            "STRATEGY DEBUG %s: 15M dataframe is EMPTY",
+            symbol,
+        )
         return []
 
     mtf_data = {
