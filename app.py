@@ -114,7 +114,7 @@ try:
 
     WORKER_AVAILABLE = True
 
-except Exception:
+except Exception as exc:
     log.exception(
         "Worker module import failed"
     )
@@ -122,6 +122,9 @@ except Exception:
     worker_module = None
     WORKER_AVAILABLE = False
 
+    st.error(
+        f"Worker module import failed: {exc}"
+    )
 
 # ============================================================
 # INITIAL SESSION STATE
