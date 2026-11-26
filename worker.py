@@ -2402,6 +2402,7 @@ def _call_evaluate_setups_mtf(
     rr_target: float = 5.0,
 ) -> list:
     """
+       """
     Pass the COMPLETE five-timeframe dataset into strategy_engine.
 
     This is the critical connection:
@@ -2416,18 +2417,11 @@ def _call_evaluate_setups_mtf(
     -> mtf_runner
     -> validated TradeSetup
     """
-        if _evaluate_setups is None:
-        log.warning(
-            "STRATEGY DEBUG %s: evaluate_setups is NOT loaded",
-            symbol,
-        )
-        return []
 
-    if df_15m.empty:
-        log.warning(
-            "STRATEGY DEBUG %s: 15M dataframe is EMPTY",
-            symbol,
-        )
+    if (
+        _evaluate_setups is None
+        or df_15m.empty
+    ):
         return []
 
     mtf_data = {
@@ -2436,7 +2430,7 @@ def _call_evaluate_setups_mtf(
         "15M": df_15m,
         "5M": df_5m,
         "1M": df_1m,
-    }
+}
 
     # Preserve any additional context supplied by MTF hooks.
     for key, value in (
