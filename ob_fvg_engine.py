@@ -342,9 +342,7 @@ def _find_order_blocks(
         if atr_value <= 0:
             continue
 
-        body = abs(
-            current_close - current_open
-        )
+        # FIX: removed unused `body` variable (was dead code).
 
         displacement = abs(
             next_close - current_close
@@ -363,6 +361,7 @@ def _find_order_blocks(
                     "low": current_low,
                     "high": current_high,
                     "created_at": work.index[i],
+                    "created_bar": i,
                     "strength": (
                         displacement / atr_value
                     ),
@@ -382,6 +381,7 @@ def _find_order_blocks(
                     "low": current_low,
                     "high": current_high,
                     "created_at": work.index[i],
+                    "created_bar": i,
                     "strength": (
                         displacement / atr_value
                     ),
@@ -447,6 +447,7 @@ def _find_fvgs(
                     "low": previous_high,
                     "high": current_low,
                     "created_at": work.index[i],
+                    "created_bar": i,
                 }
             )
 
@@ -458,6 +459,7 @@ def _find_fvgs(
                     "low": current_high,
                     "high": previous_low,
                     "created_at": work.index[i],
+                    "created_bar": i,
                 }
             )
 
@@ -468,7 +470,16 @@ def _pair_order_blocks_and_fvgs(
     order_blocks: list[dict[str, Any]],
     fvgs: list[dict[str, Any]],
     max_zones: int = 20,
+    max_pair_distance: int = 50,
 ) -> list[PairedZone]:
+    """
+    Pair OBs with FVGs of the same direction.
+
+    FIX: a pairing now requires the FVG to form at or after the OB
+    (within `max_pair_distance` bars). Previously a stale OB could
+    pair with a fresh FVG created many bars later, producing
+    nonsensical zones.
+    """
     paired: list[PairedZone] = []
 
     for ob in reversed(order_blocks):
@@ -487,6 +498,8 @@ def _pair_order_blocks_and_fvgs(
             ob.get("high")
         )
 
+        ob_bar = ob.get("created_bar")
+
         for fvg in reversed(fvgs):
             fvg_direction = _normalise_direction(
                 fvg.get("direction")
@@ -494,6 +507,22 @@ def _pair_order_blocks_and_fvgs(
 
             if fvg_direction != direction:
                 continue
+
+            # FIX: enforce temporal ordering.
+            fvg_bar = fvg.get("created_bar")
+
+            if (
+                ob_bar is not None
+                and fvg_bar is not None
+            ):
+                if fvg_bar < ob_bar:
+                    continue
+
+                if (
+                    fvg_bar - ob_bar
+                    > max_pair_distance
+                ):
+                    continue
 
             fvg_low = _safe_float(
                 fvg.get("low")
@@ -548,26 +577,30 @@ def _pair_order_blocks_and_fvgs(
 
 def _structure_state(
     df: pd.DataFrame,
+    pivot_length: int = 2,
 ) -> dict[str, Any]:
-    if not isinstance(df, pd.DataFrame):
-        return {
-            "trend": "NEUTRAL",
-            "trend_direction": 0,
-            "bull_bos": False,
-            "bear_bos": False,
-            "new_bull_setup": False,
-            "new_bear_setup": False,
-        }
+    """
+    FIX: previously this used `highs.iloc[-3]` as the "recent high"
+    (an arbitrary offset). It now uses the latest CONFIRMED swing
+    high/low (a pivot confirmed by `pivot_length` bars on each side).
+    BOS is "last close > last confirmed swing high" (or below the
+    swing low).
+    """
+    empty = {
+        "trend": "NEUTRAL",
+        "trend_direction": 0,
+        "bull_bos": False,
+        "bear_bos": False,
+        "new_bull_setup": False,
+        "new_bear_setup": False,
+    }
 
-    if len(df) < 4:
-        return {
-            "trend": "NEUTRAL",
-            "trend_direction": 0,
-            "bull_bos": False,
-            "bear_bos": False,
-            "new_bull_setup": False,
-            "new_bear_setup": False,
-        }
+    if not isinstance(df, pd.DataFrame):
+        return empty
+
+    # Need enough bars for a pivot on each side plus a close.
+    if len(df) < pivot_length * 2 + 2:
+        return empty
 
     _, highs, lows, closes = _ohlc(df)
 
@@ -576,14 +609,7 @@ def _structure_state(
         or lows is None
         or closes is None
     ):
-        return {
-            "trend": "NEUTRAL",
-            "trend_direction": 0,
-            "bull_bos": False,
-            "bear_bos": False,
-            "new_bull_setup": False,
-            "new_bear_setup": False,
-        }
+        return empty
 
     highs = pd.to_numeric(
         highs,
@@ -600,50 +626,73 @@ def _structure_state(
         errors="coerce",
     )
 
-    recent_high = highs.iloc[-3]
-    recent_low = lows.iloc[-3]
+    highs_arr = highs.to_numpy(dtype=float)
+    lows_arr = lows.to_numpy(dtype=float)
+    closes_arr = closes.to_numpy(dtype=float)
 
-    last_close = closes.iloc[-1]
+    n = len(highs_arr)
+
+    # FIX: find the latest confirmed swing high/low (a pivot with
+    # `pivot_length` bars on each side). Previously the code used
+    # highs.iloc[-3] which is not a pivot at all.
+    last_swing_high: float | None = None
+    last_swing_low: float | None = None
+
+    for p in range(n - pivot_length - 1, pivot_length - 1, -1):
+        window_h = highs_arr[p - pivot_length:p + pivot_length + 1]
+        window_l = lows_arr[p - pivot_length:p + pivot_length + 1]
+
+        if (
+            np.isfinite(window_h).all()
+            and highs_arr[p] == window_h.max()
+            and (window_h == highs_arr[p]).sum() == 1
+        ):
+            last_swing_high = float(highs_arr[p])
+            break
+
+    for p in range(n - pivot_length - 1, pivot_length - 1, -1):
+        window_l = lows_arr[p - pivot_length:p + pivot_length + 1]
+
+        if (
+            np.isfinite(window_l).all()
+            and lows_arr[p] == window_l.min()
+            and (window_l == lows_arr[p]).sum() == 1
+        ):
+            last_swing_low = float(lows_arr[p])
+            break
+
+    last_close = closes_arr[-1] if n else float("nan")
 
     bull_bos = (
-        pd.notna(recent_high)
-        and pd.notna(last_close)
-        and last_close > recent_high
+        last_swing_high is not None
+        and np.isfinite(last_close)
+        and last_close > last_swing_high
     )
 
     bear_bos = (
-        pd.notna(recent_low)
-        and pd.notna(last_close)
-        and last_close < recent_low
+        last_swing_low is not None
+        and np.isfinite(last_close)
+        and last_close < last_swing_low
     )
 
     if bull_bos and not bear_bos:
         direction = 1
         trend = "BULLISH"
-
     elif bear_bos and not bull_bos:
         direction = -1
         trend = "BEARISH"
-
     else:
-        previous_close = closes.iloc[-2]
-
-        if (
-            pd.notna(previous_close)
-            and pd.notna(last_close)
-            and last_close > previous_close
-        ):
-            direction = 1
-            trend = "BULLISH"
-
-        elif (
-            pd.notna(previous_close)
-            and pd.notna(last_close)
-            and last_close < previous_close
-        ):
-            direction = -1
-            trend = "BEARISH"
-
+        # Fall back to last-bar direction.
+        if n >= 2 and np.isfinite(closes_arr[-1]) and np.isfinite(closes_arr[-2]):
+            if closes_arr[-1] > closes_arr[-2]:
+                direction = 1
+                trend = "BULLISH"
+            elif closes_arr[-1] < closes_arr[-2]:
+                direction = -1
+                trend = "BEARISH"
+            else:
+                direction = 0
+                trend = "NEUTRAL"
         else:
             direction = 0
             trend = "NEUTRAL"
@@ -655,6 +704,127 @@ def _structure_state(
         "bear_bos": bool(bear_bos),
         "new_bull_setup": bool(bull_bos),
         "new_bear_setup": bool(bear_bos),
+    }
+
+
+def _compute_trend_series(
+    df: pd.DataFrame,
+    pivot_length: int = 2,
+) -> pd.Series:
+    """
+    FIX: build a PER-BAR trend direction series.
+
+    Previously the code broadcast the scalar `structure["trend_direction"]`
+    across every row of `signals_df`. mtf_runner._get_trend reads
+    `signals_df["trend_direction"].iloc[-1]`, so it was silently
+    getting a constant. Now the column is a genuine rolling series.
+
+    Direction at bar i is:
+      +1 if close[i] > latest confirmed swing high before i
+      -1 if close[i] < latest confirmed swing low before i
+       0 otherwise (no confirmed pivot or price is inside the range)
+    """
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        return pd.Series(dtype=int)
+
+    _, highs, lows, closes = _ohlc(df)
+
+    if (
+        highs is None
+        or lows is None
+        or closes is None
+    ):
+        return pd.Series(
+            index=df.index,
+            dtype=int,
+        )
+
+    highs = pd.to_numeric(highs, errors="coerce")
+    lows = pd.to_numeric(lows, errors="coerce")
+    closes = pd.to_numeric(closes, errors="coerce")
+
+    highs_arr = highs.to_numpy(dtype=float)
+    lows_arr = lows.to_numpy(dtype=float)
+    closes_arr = closes.to_numpy(dtype=float)
+
+    n = len(highs_arr)
+    direction = np.zeros(n, dtype=int)
+
+    # For each bar i, find the most recent confirmed swing high/low
+    # that existed BEFORE i (i.e. confirmed by pivot_length bars on
+    # each side and the right side is fully before i).
+    last_swing_high: float | None = None
+    last_swing_low: float | None = None
+
+    for i in range(n):
+        # At bar i, the "newly confirmed" pivot is p = i - pivot_length - 1
+        # (needs pivot_length bars to the right = i - 1).
+        p = i - pivot_length - 1
+
+        if p >= pivot_length:
+            window_h = highs_arr[p - pivot_length:p + pivot_length + 1]
+            window_l = lows_arr[p - pivot_length:p + pivot_length + 1]
+
+            if (
+                np.isfinite(window_h).all()
+                and highs_arr[p] == window_h.max()
+                and (window_h == highs_arr[p]).sum() == 1
+            ):
+                last_swing_high = float(highs_arr[p])
+
+            if (
+                np.isfinite(window_l).all()
+                and lows_arr[p] == window_l.min()
+                and (window_l == lows_arr[p]).sum() == 1
+            ):
+                last_swing_low = float(lows_arr[p])
+
+        if not np.isfinite(closes_arr[i]):
+            continue
+
+        if last_swing_high is not None and closes_arr[i] > last_swing_high:
+            direction[i] = 1
+        elif last_swing_low is not None and closes_arr[i] < last_swing_low:
+            direction[i] = -1
+
+    return pd.Series(direction, index=df.index, dtype=int)
+
+
+def _build_bos_series(
+    df: pd.DataFrame,
+    direction_series: pd.Series,
+) -> dict[str, pd.Series]:
+    """
+    FIX: build per-bar BOS / setup series.
+
+    Previously the code only set the last row of these columns, so
+    mtf_runner._safe_last_bool("bull_bos", lookback=5) was effectively
+    reading 4 False bars + 1 possibly-True bar. Now these are real
+    per-bar booleans.
+    """
+    index = df.index
+
+    # A BOS event fires on the bar where direction_series first
+    # transitions into a bull/bear state (i.e. the bar where close
+    # crossed the most recent confirmed swing high/low).
+    bull_bos = (
+        (direction_series == 1)
+        & (direction_series.shift(1) != 1)
+    )
+
+    bear_bos = (
+        (direction_series == -1)
+        & (direction_series.shift(1) != -1)
+    )
+
+    bull_bos = bull_bos.reindex(index, fill_value=False).astype(bool)
+    bear_bos = bear_bos.reindex(index, fill_value=False).astype(bool)
+
+    return {
+        "bull_bos": bull_bos,
+        "bear_bos": bear_bos,
+        "new_bull_setup": bull_bos,
+        "new_bear_setup": bear_bos,
     }
 
 
@@ -895,65 +1065,50 @@ def run_ob_fvg_engine(
         work
     )
 
+    # FIX: per-bar trend direction (was a constant broadcast).
+    trend_series = _compute_trend_series(work)
+
+    # FIX: per-bar BOS / setup flags (was only set on the last row).
+    bos_series = _build_bos_series(work, trend_series)
+
     sweep_series = _detect_liquidity_sweep(
         work,
         lookback=5,
     )
 
+    # FIX: build signals_df cleanly from Series. The old approach used
+    # .iloc[-1, get_loc(...)] assignments which is verbose and error
+    # prone. Now every column is a real per-bar series.
     signals_df = pd.DataFrame(
-        index=work.index
+        index=work.index,
     )
 
-    signals_df["trend_direction"] = (
-        structure["trend_direction"]
+    signals_df["trend_direction"] = trend_series.reindex(
+        work.index
+    ).fillna(0).astype(int)
+
+    signals_df["trend"] = signals_df["trend_direction"].map(
+        {1: "BULLISH", -1: "BEARISH", 0: "NEUTRAL"}
     )
 
-    signals_df["trend"] = (
-        structure["trend"]
-    )
+    signals_df["bull_bos"] = bos_series["bull_bos"].reindex(
+        work.index
+    ).fillna(False).astype(bool)
 
-    signals_df["bull_bos"] = False
-    signals_df["bear_bos"] = False
-    signals_df["new_bull_setup"] = False
-    signals_df["new_bear_setup"] = False
+    signals_df["bear_bos"] = bos_series["bear_bos"].reindex(
+        work.index
+    ).fillna(False).astype(bool)
 
-    if len(signals_df) > 0:
-        signals_df.iloc[
-            -1,
-            signals_df.columns.get_loc(
-                "bull_bos"
-            ),
-        ] = structure["bull_bos"]
+    signals_df["new_bull_setup"] = bos_series["new_bull_setup"].reindex(
+        work.index
+    ).fillna(False).astype(bool)
 
-        signals_df.iloc[
-            -1,
-            signals_df.columns.get_loc(
-                "bear_bos"
-            ),
-        ] = structure["bear_bos"]
+    signals_df["new_bear_setup"] = bos_series["new_bear_setup"].reindex(
+        work.index
+    ).fillna(False).astype(bool)
 
-        signals_df.iloc[
-            -1,
-            signals_df.columns.get_loc(
-                "new_bull_setup"
-            ),
-        ] = structure[
-            "new_bull_setup"
-        ]
-
-        signals_df.iloc[
-            -1,
-            signals_df.columns.get_loc(
-                "new_bear_setup"
-            ),
-        ] = structure[
-            "new_bear_setup"
-        ]
-
-    signals_df[
-        "swept_liquidity_count"
-    ] = sweep_series.reindex(
-        signals_df.index
+    signals_df["swept_liquidity_count"] = sweep_series.reindex(
+        work.index
     ).fillna(0).astype(int)
 
     return {
@@ -968,22 +1123,12 @@ def run_ob_fvg_engine(
         "atr": atr_series,
 
         "trend": structure["trend"],
-        "trend_direction": structure[
-            "trend_direction"
-        ],
+        "trend_direction": structure["trend_direction"],
 
-        "bull_bos": structure[
-            "bull_bos"
-        ],
-        "bear_bos": structure[
-            "bear_bos"
-        ],
-        "new_bull_setup": structure[
-            "new_bull_setup"
-        ],
-        "new_bear_setup": structure[
-            "new_bear_setup"
-        ],
+        "bull_bos": structure["bull_bos"],
+        "bear_bos": structure["bear_bos"],
+        "new_bull_setup": structure["new_bull_setup"],
+        "new_bear_setup": structure["new_bear_setup"],
 
         # Required by mtf_runner.py.
         "signals_df": signals_df,
@@ -991,4 +1136,4 @@ def run_ob_fvg_engine(
         "timeframe_minutes": (
             timeframe_minutes
         ),
-    }
+}
